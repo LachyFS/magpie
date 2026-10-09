@@ -1,6 +1,6 @@
 [package]
 name = "magpie"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Collect what catches your eye. A native infinite mood board, built with Rust and GPUI."
 license = "Apache-2.0"

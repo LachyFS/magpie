@@ -1,11 +1,8 @@
 Collect what catches your eye. Magpie is a native mood board built with Rust and GPUI.
 
-- A collapsible left sidebar for boards, with the Magpie wordmark, active-board highlighting, scrolling, and quick creation. Toggle it with Ctrl/Cmd+B.
-- Fit and zoom controls center content in the available canvas beside the sidebar.
-- A quieter canvas: removed the image-count footer, saved-status text, and Add images button.
-- A small animated spinner appears during imports and saving, then disappears when finished.
-- Drag and drop images, paste them, or use Ctrl/Cmd+O to open the file picker.
-- Refreshed README screenshots.
+- New Collector app icon: a magpie carrying a sage image card on a cream tile.
+- Updated icons in macOS app bundles, Windows executables, and Linux launchers.
+- The README now shows the selected icon, including in downloaded packages.
 
 ### Downloads
 
