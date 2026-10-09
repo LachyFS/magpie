@@ -6,7 +6,7 @@ The publish job has the only write permission. It creates a draft first, attache
 
 ## Creating a release
 
-1. Update the package version in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, and edit `docs/RELEASE_NOTES.md`.
+1. Update the package version in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, and edit `docs/RELEASE_NOTES.md`. Once the new release is published, update the versioned download links in `README.md` to its assets so the buttons always point to available files.
 2. Commit and push. Wait for CI to pass on all four targets.
 3. Create an annotated tag matching that version and push it:
 

@@ -7,6 +7,12 @@
 
 Collect what catches your eye. A native mood board app built in **Rust + GPUI**, with a dark infinite canvas and just a few floating controls.
 
+[![Download for macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple_Silicon-596d68?style=for-the-badge&logo=apple&logoColor=white&labelColor=17191b)](https://github.com/LachyFS/magpie/releases/download/v0.1.3/magpie-0.1.3-macos-aarch64.dmg)
+[![Download for Linux as a Debian package](https://img.shields.io/badge/Linux-DEB-596d68?style=for-the-badge&logo=linux&logoColor=white&labelColor=17191b)](https://github.com/LachyFS/magpie/releases/download/v0.1.3/magpie-0.1.3-linux-x86_64.deb)
+[![Download for Windows x64](https://img.shields.io/badge/Windows-x64-596d68?style=for-the-badge&labelColor=17191b)](https://github.com/LachyFS/magpie/releases/download/v0.1.3/magpie-0.1.3-windows-x86_64.zip)
+
+[macOS Intel](https://github.com/LachyFS/magpie/releases/download/v0.1.3/magpie-0.1.3-macos-x86_64.dmg) · [Linux portable](https://github.com/LachyFS/magpie/releases/download/v0.1.3/magpie-0.1.3-linux-x86_64.tar.gz)
+
 ![Magpie's dark infinite canvas with a collection of forest, lake, and mountain photographs](docs/screenshots/canvas.png)
 
 ## Download
