@@ -1,8 +1,46 @@
 # Magpie
 
+[![CI](https://github.com/LachyFS/magpie/actions/workflows/ci.yml/badge.svg)](https://github.com/LachyFS/magpie/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/LachyFS/magpie)](https://github.com/LachyFS/magpie/releases/latest)
+
 Collect what catches your eye. A native mood board app built in **Rust + GPUI**, with a dark infinite canvas and just a few floating controls.
 
-## Run
+![Magpie's dark infinite canvas with a collection of forest, lake, and mountain photographs](docs/screenshots/canvas.png)
+
+## Download
+
+**[Download the latest release](https://github.com/LachyFS/magpie/releases/latest)** — no Rust toolchain required.
+
+| Platform | Download | Install |
+| --- | --- | --- |
+| Linux x86-64 | `magpie-VERSION-linux-x86_64.deb` | `sudo apt install ./magpie-*.deb`, then open Magpie from your app launcher |
+| Linux x86-64, portable | `magpie-VERSION-linux-x86_64.tar.gz` | Extract and run `./magpie` from the extracted folder |
+| macOS Apple Silicon | `magpie-VERSION-macos-aarch64.dmg` | Open the disk image and drag Magpie into Applications |
+| macOS Intel | `magpie-VERSION-macos-x86_64.dmg` | Open the disk image and drag Magpie into Applications |
+| Windows x86-64 | `magpie-VERSION-windows-x86_64.zip` | Extract the ZIP and open `magpie.exe` |
+
+Linux packages target Ubuntu 22.04+/Debian 12+ or compatible distributions and require a Vulkan-capable graphics driver. The portable archive also needs the runtime libraries listed in [release documentation](docs/RELEASING.md#linux-runtime). macOS packages require macOS 11 or later. Windows packages target Windows 10/11.
+
+The macOS app has an ad-hoc signature and is not Apple-notarized. The Windows app is not Authenticode-signed. These initial builds can trigger your OS's downloaded-app prompts; see [Apple's instructions for opening a trusted app](https://support.apple.com/en-us/102445).
+
+Every release includes `SHA256SUMS.txt`. Verify a download with `sha256sum --check --ignore-missing SHA256SUMS.txt` on Linux, `shasum -a 256 FILE` on macOS, or `Get-FileHash FILE -Algorithm SHA256` in PowerShell, comparing the result with the corresponding checksum.
+
+## Screenshots
+
+Switch boards or start a new collection in one click:
+
+![Magpie's board switcher with three local boards and a new-board action](docs/screenshots/boards.png)
+
+<details>
+<summary>A fresh canvas</summary>
+
+![A new empty Magpie board with drag-and-drop and choose-images instructions](docs/screenshots/empty.png)
+
+</details>
+
+These are captures of the running app. [Demo photo credits and screenshot instructions](docs/SCREENSHOTS.md).
+
+## Build from source
 
 ```sh
 git clone https://github.com/LachyFS/magpie.git
@@ -12,15 +50,17 @@ cd magpie
 ./run.sh ~/Pictures/reference.jpg ~/Pictures/palette.png
 ```
 
-Requires a current stable Rust toolchain. On Linux, GPUI needs a Vulkan-capable graphics driver and the X11/Wayland development libraries. On Ubuntu/Debian:
+The Rust toolchain is pinned in `rust-toolchain.toml`; rustup installs it automatically. On Linux, GPUI needs a Vulkan-capable graphics driver and the X11/Wayland development libraries. On Ubuntu/Debian:
 
 ```sh
-sudo apt install build-essential pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype-dev
+sudo apt install build-essential pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype-dev libssl-dev
 ```
 
 You can also use `cargo run --locked` directly. The launch script adds Rust's default installation directory to `PATH` and uses optional local Linux libraries from `.local/` when present. The checked-in lockfile retains libc 0.2.186 for compatibility with GPUI's transitive xattr dependency.
 
-Linux is tested. GPUI also supports macOS and Windows, but those targets have not been verified for this app. macOS requires Xcode's command-line tools; Windows release builds require the Windows SDK shader compiler. On Windows, launch with `cargo run --locked`.
+GitHub Actions builds Linux, macOS (both architectures), and Windows packages. Linux also runs the native end-to-end smoke test. macOS needs full Xcode with Metal command-line tools; Windows needs the MSVC toolchain and Windows SDK shader compiler. On Windows, launch development builds with `cargo run --locked`.
+
+For an optimized local build, use `cargo build --release --locked` and run `target/release/magpie` (`magpie.exe` on Windows). [Packaging and release instructions](docs/RELEASING.md).
 
 ## Using the canvas
 

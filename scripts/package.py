@@ -28,6 +28,7 @@ def version():
 def copy_docs(destination):
     for name in ["README.md", "LICENSE", "NOTICE"]:
         shutil.copy2(ROOT / name, destination / name)
+    shutil.copytree(ROOT / "docs", destination / "docs")
 
 
 def package(target, binary, output):
@@ -59,11 +60,13 @@ def package(target, binary, output):
             shutil.copy2(ROOT / "assets/magpie.svg", deb / "usr/share/icons/hicolor/scalable/apps/magpie.svg")
             copy_docs(deb / "usr/share/doc/magpie")
             installed_kib = (sum(p.stat().st_size for p in (deb / "usr").rglob("*") if p.is_file()) + 1023) // 1024
+            versions = re.findall(r"GLIBC_(\d+)\.(\d+)", subprocess.check_output(["readelf", "--version-info", str(binary)], text=True))
+            minimum_glibc = ".".join(map(str, max((int(a), int(b)) for a, b in versions)))
             (deb / "DEBIAN/control").write_text(
                 f"Package: magpie\nVersion: {release.replace('-', '~')}\nArchitecture: amd64\n"
                 "Maintainer: LachyFS <100457804+LachyFS@users.noreply.github.com>\n"
                 f"Installed-Size: {installed_kib}\nSection: graphics\nPriority: optional\n"
-                "Depends: libc6 (>= 2.35), libgcc-s1, libstdc++6, libxcb1, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0, libfontconfig1, libfreetype6, libwayland-client0, libwayland-cursor0, libvulkan1\n"
+                f"Depends: libc6 (>= {minimum_glibc}), libgcc-s1, libstdc++6, libxcb1, libxcb-xkb1, libxkbcommon0, libxkbcommon-x11-0, libfontconfig1, libfreetype6, libwayland-client0, libwayland-cursor0, libvulkan1\n"
                 "Recommends: xdg-desktop-portal\nHomepage: https://github.com/LachyFS/magpie\n"
                 "Description: A native infinite mood board\n Collect what catches your eye with image drag and drop, a dark infinite\n canvas, quick boards, and local autosave. Built with Rust and GPUI.\n",
                 encoding="utf-8",
@@ -101,14 +104,15 @@ def package(target, binary, output):
             copy_docs(bundle)
             archive = output / f"{stem}.zip"
             with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                for path in sorted(bundle.iterdir()):
-                    zip_file.write(path, f"{stem}/{path.name}")
+                for path in sorted(bundle.rglob("*")):
+                    zip_file.write(path, f"{stem}/{path.relative_to(bundle).as_posix()}")
             with zipfile.ZipFile(archive) as zip_file:
                 if zip_file.testzip() is not None:
                     raise RuntimeError("Archive integrity check failed")
             artifacts.append(archive)
     for path in artifacts:
-        digest = hashlib.file_digest(path.open("rb"), "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(path.read_bytes()).hexdigest()
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(stream.read()).hexdigest()
         path.with_name(path.name + ".sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
         print(path)
 

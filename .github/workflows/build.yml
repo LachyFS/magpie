@@ -29,7 +29,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     env:
       CARGO_TERM_COLOR: always
-      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_JOBS: '4'
       MACOSX_DEPLOYMENT_TARGET: '11.0'
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
     defaults:
@@ -49,6 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: release-${{ matrix.target }}
+          cache-on-failure: true
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -71,7 +72,16 @@ jobs:
         run: cargo build --release --locked --target "$BUILD_TARGET"
       - name: Check Linux lints
         if: runner.os == 'Linux'
-        run: cargo clippy --all-targets --locked -- -D warnings
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: cargo clippy --release --target "$BUILD_TARGET" --all-targets --locked -- -D warnings
+      - name: Check the release executable starts
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          binary="target/$BUILD_TARGET/release/magpie"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then binary="$binary.exe"; fi
+          "$binary" --version
       - name: Package downloads
         env:
           BUILD_TARGET: ${{ matrix.target }}
@@ -81,7 +91,8 @@ jobs:
         run: |
           mkdir -p artifacts/package-test
           tar -xzf dist/magpie-*-linux-x86_64.tar.gz -C artifacts/package-test
-          export MAGPIE_BINARY="$(realpath artifacts/package-test/magpie-*/magpie)"
+          MAGPIE_BINARY="$(realpath artifacts/package-test/magpie-*/magpie)"
+          export MAGPIE_BINARY
           "$MAGPIE_BINARY" --version
           /usr/bin/python3 scripts/smoke_x11.py
           dpkg-deb --info dist/*.deb
@@ -92,3 +103,12 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
+      - name: Preserve native test diagnostics
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-test-diagnostics
+          path: artifacts/smoke-failure/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -61,7 +61,7 @@ jobs:
       - name: Verify all downloads
         working-directory: dist
         run: |
-          cat *.sha256 | sort -k2 > SHA256SUMS.txt
+          cat ./*.sha256 | sort -k2 > SHA256SUMS.txt
           test "$(wc -l < SHA256SUMS.txt)" -eq 5
           sha256sum --check SHA256SUMS.txt
           rm -- *.sha256
@@ -77,4 +77,8 @@ jobs:
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "Magpie $RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi

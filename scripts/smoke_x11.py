@@ -16,13 +16,25 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL = ROOT / ".local/sysroot/usr"
 sys.path.insert(0, str(LOCAL / "lib/python3/dist-packages"))
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageGrab  # noqa: E402
 from Xlib import X, display, protocol  # noqa: E402
 
 
 def executable(name):
     local = LOCAL / "bin" / name
     return str(local) if local.exists() else shutil.which(name) or name
+
+
+class TestDirectory(tempfile.TemporaryDirectory):
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is not None:
+            destination = ROOT / "artifacts/smoke-failure"
+            shutil.copytree(self.name, destination, dirs_exist_ok=True)
+            log = destination / "app.log"
+            if log.exists():
+                print(log.read_text(), file=sys.stderr)
+            print(f"Failure diagnostics saved to {destination}", file=sys.stderr)
+        return super().__exit__(exc_type, exc_value, traceback)
 
 
 def run():
@@ -39,7 +51,7 @@ def run():
     try:
         with os.fdopen(read_fd) as pipe:
             env["DISPLAY"] = ":" + pipe.readline().strip()
-        with tempfile.TemporaryDirectory(prefix="magpie-smoke-") as temporary:
+        with TestDirectory(prefix="magpie-smoke-") as temporary:
             data = Path(temporary)
             env["MAGPIE_DATA_DIR"] = str(data / "library")
             log = open(data / "app.log", "w+")
@@ -50,22 +62,46 @@ def run():
                 time.sleep(0.08)
 
             def start():
+                nonlocal app
                 process = subprocess.Popen([binary], env=env, stdout=log, stderr=log)
+                app = process
                 for _ in range(100):
                     if process.poll() is not None:
                         raise AssertionError("App exited during startup")
-                    found = subprocess.run([executable("xdotool"), "search", "--name", "^Magpie$"], env=env, capture_output=True, text=True)
+                    found = subprocess.run([executable("xdotool"), "search", "--onlyvisible", "--name", "^Magpie$"], env=env, capture_output=True, text=True)
                     if found.stdout.strip():
                         window = int(found.stdout.splitlines()[0])
                         x("windowmap", window, "windowsize", window, 1280, 820, "windowmove", window, 0, 0, "windowfocus", window)
-                        time.sleep(0.3)
+                        x("mousemove", 20, 100, "mousemove", 600, 100)
+                        # Mapping the OS window precedes GPUI's first rendered frame.
+                        # Software Vulkan can take several seconds on a cold CI runner.
+                        connection = display.Display(env["DISPLAY"])
+                        try:
+                            for _ in range(300):
+                                if process.poll() is not None:
+                                    raise AssertionError("App exited before its first frame")
+                                pixel = connection.screen().root.get_image(600, 100, 1, 1, X.ZPixmap, 0xFFFFFFFF)
+                                if pixel and any(pixel.data[:3]):
+                                    break
+                                time.sleep(0.1)
+                            else:
+                                ImageGrab.grab(xdisplay=env["DISPLAY"]).save(data / "startup.png")
+                                raise AssertionError("App did not render its first frame within 30 seconds")
+                        finally:
+                            connection.close()
+                        x("windowfocus", window, "mousemove", 600, 100, "click", 1)
                         return process, window
                     time.sleep(0.1)
                 raise AssertionError("Window never appeared")
 
             def state():
                 time.sleep(0.5)  # Wait for debounced persistence, not just a paint.
-                return json.loads((data / "library/boards.json").read_text())
+                manifest = data / "library/boards.json"
+                for _ in range(50):
+                    if manifest.exists():
+                        return json.loads(manifest.read_text())
+                    time.sleep(0.1)
+                raise AssertionError("No saved board after waiting for startup and autosave")
 
             def board():
                 current = state()
