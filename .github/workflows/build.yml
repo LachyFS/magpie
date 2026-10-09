@@ -54,7 +54,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype-dev libssl-dev libvulkan1 mesa-vulkan-drivers xvfb xdotool python3-xlib python3-pil
+          sudo apt-get install -y build-essential pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype-dev libssl-dev
       - name: Find the Windows shader compiler
         if: runner.os == 'Windows'
         shell: pwsh
@@ -86,16 +86,6 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
         run: python3 scripts/package.py --target "$BUILD_TARGET"
-      - name: Test the packaged Linux app
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p artifacts/package-test
-          tar -xzf dist/magpie-*-linux-x86_64.tar.gz -C artifacts/package-test
-          MAGPIE_BINARY="$(realpath artifacts/package-test/magpie-*/magpie)"
-          export MAGPIE_BINARY
-          "$MAGPIE_BINARY" --version
-          /usr/bin/python3 scripts/smoke_x11.py
-          dpkg-deb --info dist/*.deb
       - name: Upload packages and checksums
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -104,8 +94,42 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+  linux-smoke:
+    name: Linux package interaction test
+    needs: build
+    # Keep the build's glibc 2.35 baseline while using a current software Vulkan
+    # driver. Ubuntu 22.04's Mesa 23 llvmpipe opens a blank GPUI window.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: magpie-x86_64-unknown-linux-gnu
+          path: dist
+      - name: Verify downloads and install the Debian package
+        run: |
+          cd dist
+          sha256sum --check ./*.sha256
+          sudo apt-get update
+          sudo apt-get install -y ./magpie-*.deb mesa-vulkan-drivers xvfb xdotool python3-xlib python3-pil
+          /usr/bin/magpie --version
+      - name: Test the portable Linux app
+        env:
+          RUST_LOG: gpui=info,blade_graphics=info
+        run: |
+          mkdir -p artifacts/package-test
+          tar -xzf dist/magpie-*-linux-x86_64.tar.gz -C artifacts/package-test
+          MAGPIE_BINARY="$(realpath artifacts/package-test/magpie-*/magpie)"
+          export MAGPIE_BINARY
+          "$MAGPIE_BINARY" --version
+          /usr/bin/python3 scripts/smoke_x11.py
       - name: Preserve native test diagnostics
-        if: failure() && runner.os == 'Linux'
+        if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-test-diagnostics

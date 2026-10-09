@@ -703,6 +703,8 @@ impl Magpie {
                     .child(
                         div()
                             .w(px(88.0))
+                            .whitespace_nowrap()
+                            .flex_shrink_0()
                             .text_size(px(24.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(TEXT))

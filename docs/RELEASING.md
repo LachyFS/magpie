@@ -30,7 +30,7 @@ Versions with a prerelease suffix (for example `v0.2.0-rc.1`) are marked as prer
 | macOS 15, Intel | `x86_64-apple-darwin` | `.dmg` containing `Magpie.app` |
 | Windows Server 2022 | `x86_64-pc-windows-msvc` | portable `.zip` containing `magpie.exe` |
 
-The Rust version, dependency lockfile, and action revisions are pinned. Every target runs the library tests. Linux runs formatting, Clippy, and the native X11 interaction suite against the binary extracted from the release archive. macOS bundles are ad-hoc signed and verified with `codesign`; disk images are verified with `hdiutil`. Windows archives are checked for corruption. All packages include the README, license, and third-party notice.
+The Rust version, dependency lockfile, and action revisions are pinned. Every target runs the library tests and formatting checks. Linux also runs Clippy. A separate Ubuntu 24.04 job installs the Debian package and runs the native X11 interaction suite against the binary extracted from the portable archive. That job must pass before publication. macOS bundles are ad-hoc signed and verified with `codesign`; disk images are verified with `hdiutil`. Windows archives are checked for corruption. All packages include the README, license, and third-party notice.
 
 The Windows build locates `fxc.exe` from the installed SDK and passes its path to GPUI. It uses a static MSVC runtime and a GUI subsystem, so launching from Explorer does not open a console window. The macOS app bundle contains the executable, icon, and bundle metadata. The `.deb` installs the executable, desktop launcher, icons, and documentation.
 
@@ -45,6 +45,8 @@ sudo apt install libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0 libfontcon
 ```
 
 Install your GPU's Vulkan driver as well (`mesa-vulkan-drivers` for supported Mesa GPUs). A desktop portal backend supplies native file-selection dialogs.
+
+Use a current graphics driver. Older Mesa 23.x software Vulkan drivers can produce a blank GPUI window ([upstream report](https://github.com/zed-industries/zed/issues/16414)). The GUI test runs on Ubuntu 24.04 for its newer Mesa driver; compilation stays on Ubuntu 22.04 to retain the older glibc baseline.
 
 ## Local packaging
 

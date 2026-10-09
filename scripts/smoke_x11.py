@@ -26,8 +26,16 @@ def executable(name):
 
 
 class TestDirectory(tempfile.TemporaryDirectory):
+    def __init__(self, *args, xdisplay, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.xdisplay = xdisplay
+
     def __exit__(self, exc_type, exc_value, traceback):
         if exc_type is not None:
+            try:
+                ImageGrab.grab(xdisplay=self.xdisplay).save(Path(self.name) / "failure.png")
+            except Exception as error:
+                print(f"Could not capture failure screenshot: {error}", file=sys.stderr)
             destination = ROOT / "artifacts/smoke-failure"
             shutil.copytree(self.name, destination, dirs_exist_ok=True)
             log = destination / "app.log"
@@ -40,6 +48,7 @@ class TestDirectory(tempfile.TemporaryDirectory):
 def run():
     env = dict(os.environ)
     env.pop("WAYLAND_DISPLAY", None)
+    env["LC_ALL"] = "C.UTF-8"
     env["LD_LIBRARY_PATH"] = str(LOCAL / "lib/x86_64-linux-gnu") + ":" + env.get("LD_LIBRARY_PATH", "")
     read_fd, write_fd = os.pipe()
     xvfb = subprocess.Popen(
@@ -51,7 +60,7 @@ def run():
     try:
         with os.fdopen(read_fd) as pipe:
             env["DISPLAY"] = ":" + pipe.readline().strip()
-        with TestDirectory(prefix="magpie-smoke-") as temporary:
+        with TestDirectory(prefix="magpie-smoke-", xdisplay=env["DISPLAY"]) as temporary:
             data = Path(temporary)
             env["MAGPIE_DATA_DIR"] = str(data / "library")
             log = open(data / "app.log", "w+")
@@ -115,10 +124,23 @@ def run():
             x("key", "ctrl+n")
             assert len(state()["boards"]) == 2, "New board shortcut"
             x("key", "F2")
+            # A cold software renderer may need time to paint the new dialog
+            # and register its text input before native typing can be handled.
+            for _ in range(50):
+                if ImageGrab.grab(xdisplay=env["DISPLAY"]).getpixel((465, 360))[:3] == (34, 36, 38):
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("Rename dialog did not render")
             x("type", "--clearmodifiers", "Smoke board")
             x("key", "Return")
             assert board()["name"] == "Smoke board", "Rename"
-            x("mousemove", 275, 42, "click", 1)
+            # The board title's width varies with the OS's fallback font.
+            # Locate the panel border and click its trailing '+' button.
+            header = ImageGrab.grab(xdisplay=env["DISPLAY"])
+            borders = [p for p in range(200, 600) if header.getpixel((p, 42))[:3] == (52, 55, 57)]
+            assert borders, "Board switcher is visible"
+            x("mousemove", max(borders) - 20, 42, "click", 1)
             assert len(state()["boards"]) == 3, "New board button"
             x("key", "ctrl+z")
             assert board()["name"] == "Smoke board", "Undo board creation"
