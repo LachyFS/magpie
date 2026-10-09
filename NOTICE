@@ -1,0 +1,3 @@
+Magpie includes a text-input implementation adapted from GPUI 0.2.2,
+Copyright Zed Industries and contributors, licensed under Apache-2.0.
+Source: https://github.com/zed-industries/zed/tree/main/crates/gpui/examples/input.rs

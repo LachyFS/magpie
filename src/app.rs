@@ -1,0 +1,1306 @@
+use crate::input::TextInput;
+use gpui::{prelude::*, *};
+use magpie::{
+    model::{Camera, History, ImageItem, Library},
+    storage::Storage,
+};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
+use uuid::Uuid;
+
+const BG: u32 = 0x17191b;
+const PANEL: u32 = 0x222426;
+const BORDER: u32 = 0x343739;
+const TEXT: u32 = 0xe9e9e3;
+const MUTED: u32 = 0x909593;
+const ACCENT: u32 = 0xc6d5b5;
+
+enum Gesture {
+    Pan {
+        start: [f32; 2],
+        camera: Camera,
+    },
+    Move {
+        start: [f32; 2],
+        positions: Vec<(Uuid, f32, f32)>,
+    },
+    Resize {
+        start: [f32; 2],
+        id: Uuid,
+        size: [f32; 2],
+    },
+    Marquee {
+        start: [f32; 2],
+        end: [f32; 2],
+    },
+}
+
+pub struct Magpie {
+    storage: Storage,
+    library: Library,
+    history: History,
+    selected: HashSet<Uuid>,
+    focus: FocusHandle,
+    gesture: Option<Gesture>,
+    before_gesture: Option<Library>,
+    space: bool,
+    hand: bool,
+    boards_open: bool,
+    help_open: bool,
+    rename: Option<Entity<TextInput>>,
+    importing: bool,
+    save_task: Option<Task<()>>,
+    dirty: bool,
+    message: Option<String>,
+    message_task: Option<Task<()>>,
+    viewport: [f32; 2],
+}
+
+impl Magpie {
+    pub fn new(
+        storage: Storage,
+        library: Library,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus = cx.focus_handle();
+        focus.focus(window);
+        cx.on_app_quit(|this, _| {
+            if let Err(error) = this.storage.save(&this.library) {
+                eprintln!("Couldn't save boards: {error:#}");
+            }
+            async {}
+        })
+        .detach();
+        let view = cx.weak_entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            view.update(cx, |this, cx| this.prepare_close(cx))
+                .unwrap_or(true)
+        });
+        Self {
+            storage,
+            library,
+            history: History::default(),
+            selected: HashSet::new(),
+            focus,
+            gesture: None,
+            before_gesture: None,
+            space: false,
+            hand: false,
+            boards_open: false,
+            help_open: false,
+            rename: None,
+            importing: false,
+            save_task: None,
+            dirty: false,
+            message: None,
+            message_task: None,
+            viewport: [1280.0, 820.0],
+        }
+    }
+
+    fn prepare_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.importing {
+            self.toast("Finishing your import. Close again in a moment.", cx);
+            return false;
+        }
+        match self.storage.save(&self.library) {
+            Ok(()) => true,
+            Err(error) => {
+                self.toast(format!("Couldn't save your boards: {error}"), cx);
+                false
+            }
+        }
+    }
+
+    fn toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.message = Some(message.into());
+        self.message_task = Some(cx.spawn(async |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.message = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn save(&mut self, cx: &mut Context<Self>) {
+        self.dirty = true;
+        self.save_task = Some(cx.spawn(async |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(350))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match this.storage.save(&this.library) {
+                    Ok(()) => this.dirty = false,
+                    Err(error) => this.toast(format!("Couldn't save: {error}"), cx),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn checkpoint(&mut self) {
+        self.history.checkpoint(&self.library);
+    }
+
+    fn new_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_gesture(cx);
+        self.checkpoint();
+        self.library.add_board();
+        self.selected.clear();
+        self.boards_open = false;
+        self.rename = None;
+        self.focus.focus(window);
+        self.save(cx);
+    }
+
+    fn switch_board(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_gesture(cx);
+        self.library.active = id;
+        self.selected.clear();
+        self.boards_open = false;
+        self.focus.focus(window);
+        self.save(cx);
+    }
+
+    fn rename_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.boards_open = false;
+        let name = self.library.board().name.clone();
+        let input = cx.new(|cx| TextInput::new(name, cx));
+        input.focus_handle(cx).focus(window);
+        self.rename = Some(input);
+        cx.notify();
+    }
+
+    fn finish_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = self.rename.take() {
+            let name = input
+                .read(cx)
+                .content
+                .trim()
+                .chars()
+                .take(100)
+                .collect::<String>();
+            if !name.is_empty() && name != self.library.board().name {
+                self.checkpoint();
+                self.library.board_mut().name = name;
+                self.save(cx);
+            }
+        }
+        self.focus.focus(window);
+        cx.notify();
+    }
+
+    fn choose_images(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add to board".into()),
+        });
+        cx.spawn(async move |this, cx| match receiver.await {
+            Ok(Ok(Some(paths))) => {
+                let _ = this.update(cx, |this, cx| {
+                    let center = [
+                        this.viewport[0] / 2.0 - 180.0,
+                        this.viewport[1] / 2.0 - 130.0,
+                    ];
+                    this.import_paths(paths, center, cx);
+                });
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.toast(format!("Couldn't open the file picker: {error}"), cx)
+                });
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
+    pub fn import_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        position: [f32; 2],
+        cx: &mut Context<Self>,
+    ) {
+        if self.importing {
+            self.toast("Adding images… one moment", cx);
+            return;
+        }
+        if paths.is_empty() {
+            return;
+        }
+        self.importing = true;
+        let storage = self.storage.clone();
+        let board = self.library.active;
+        let world = self.library.board().camera.world(position);
+        let task = cx.background_executor().spawn(async move {
+            let mut images = vec![];
+            let mut errors = vec![];
+            for path in paths {
+                match storage.import_path(&path) {
+                    Ok(image) => images.push(image),
+                    Err(error) => errors.push(format!(
+                        "{}: {error}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )),
+                }
+            }
+            (images, errors)
+        });
+        cx.spawn(async move |this, cx| {
+            let (images, errors) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_import(board, world, images, errors, cx)
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_import(
+        &mut self,
+        board: Uuid,
+        position: [f32; 2],
+        images: Vec<ImageItem>,
+        errors: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.importing = false;
+        let count = images.len();
+        if count > 0 && self.library.boards.iter().any(|b| b.id == board) {
+            self.checkpoint();
+            let target = self
+                .library
+                .boards
+                .iter_mut()
+                .find(|b| b.id == board)
+                .unwrap();
+            let mut x = position[0];
+            let mut y = position[1];
+            let mut row_height: f32 = 0.0;
+            if self.library.active == board {
+                self.selected.clear();
+            }
+            for (index, mut item) in images.into_iter().enumerate() {
+                if index > 0 && index % 3 == 0 {
+                    x = position[0];
+                    y += row_height + 24.0;
+                    row_height = 0.0;
+                }
+                item.x = x;
+                item.y = y;
+                x += item.width + 24.0;
+                row_height = row_height.max(item.height);
+                if self.library.active == board {
+                    self.selected.insert(item.id);
+                }
+                target.images.push(item);
+            }
+            self.save(cx);
+        }
+        if let Some(error) = errors.first() {
+            self.toast(
+                format!("{count} added · {} skipped. {error}", errors.len()),
+                cx,
+            );
+        } else if count > 0 {
+            self.toast(
+                format!(
+                    "{count} {} added",
+                    if count == 1 { "image" } else { "images" }
+                ),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        if self.importing {
+            return;
+        }
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        let images = clipboard
+            .into_entries()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image.bytes.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if images.is_empty() {
+            self.toast("Copy an image, then paste it here", cx);
+            return;
+        }
+        self.importing = true;
+        let board = self.library.active;
+        let world = self.library.board().camera.world([
+            self.viewport[0] / 2.0 - 180.0,
+            self.viewport[1] / 2.0 - 130.0,
+        ]);
+        let storage = self.storage.clone();
+        let task = cx.background_executor().spawn(async move {
+            let mut result = vec![];
+            let mut errors = vec![];
+            for bytes in images {
+                match storage.import_bytes(&bytes, "Pasted image") {
+                    Ok(image) => result.push(image),
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+            (result, errors)
+        });
+        cx.spawn(async move |this, cx| {
+            let (images, errors) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_import(board, world, images, errors, cx)
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        self.library
+            .board_mut()
+            .images
+            .retain(|item| !self.selected.contains(&item.id));
+        self.selected.clear();
+        self.save(cx);
+    }
+
+    fn duplicate(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let images = self
+            .library
+            .board()
+            .images
+            .iter()
+            .filter(|i| self.selected.contains(&i.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.selected.clear();
+        for mut item in images {
+            item.id = Uuid::new_v4();
+            item.x += 28.0;
+            item.y += 28.0;
+            self.selected.insert(item.id);
+            self.library.board_mut().images.push(item);
+        }
+        self.save(cx);
+    }
+
+    fn fit(&mut self, cx: &mut Context<Self>) {
+        let board = self.library.board_mut();
+        board.camera.fit(&board.images, self.viewport);
+        self.save(cx);
+    }
+
+    fn zoom(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let center = [self.viewport[0] / 2.0, self.viewport[1] / 2.0];
+        let camera = &mut self.library.board_mut().camera;
+        camera.zoom_at(center, camera.zoom * factor);
+        self.save(cx);
+    }
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window);
+        self.boards_open = false;
+        self.help_open = false;
+        let p = [f32::from(event.position.x), f32::from(event.position.y)];
+        let board = self.library.board();
+        let camera = board.camera;
+        if self.space || self.hand || event.button != MouseButton::Left {
+            self.gesture = Some(Gesture::Pan { start: p, camera });
+        } else {
+            let world = camera.world(p);
+            let handle = if self.selected.len() == 1 {
+                board
+                    .images
+                    .iter()
+                    .find(|i| self.selected.contains(&i.id))
+                    .filter(|i| {
+                        let corner = camera.screen([i.x + i.width, i.y + i.height]);
+                        (corner[0] - p[0]).abs() < 10.0 && (corner[1] - p[1]).abs() < 10.0
+                    })
+            } else {
+                None
+            };
+            if let Some(item) = handle {
+                self.gesture = Some(Gesture::Resize {
+                    start: p,
+                    id: item.id,
+                    size: [item.width, item.height],
+                });
+                self.before_gesture = Some(self.library.clone());
+            } else if let Some(item) = board.images.iter().rev().find(|i| i.contains(world)) {
+                let id = item.id;
+                if event.modifiers.shift {
+                    if !self.selected.insert(id) {
+                        self.selected.remove(&id);
+                    }
+                } else if !self.selected.contains(&id) {
+                    self.selected.clear();
+                    self.selected.insert(id);
+                }
+                let positions = self
+                    .library
+                    .board()
+                    .images
+                    .iter()
+                    .filter(|i| self.selected.contains(&i.id))
+                    .map(|i| (i.id, i.x, i.y))
+                    .collect();
+                self.gesture = Some(Gesture::Move {
+                    start: p,
+                    positions,
+                });
+                self.before_gesture = Some(self.library.clone());
+            } else if event.modifiers.shift {
+                self.gesture = Some(Gesture::Marquee { start: p, end: p });
+            } else {
+                self.selected.clear();
+                self.gesture = Some(Gesture::Pan { start: p, camera });
+            }
+        }
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gesture.is_none() {
+            return;
+        }
+        if event.pressed_button.is_none() {
+            self.finish_gesture(cx);
+            return;
+        }
+        let p = [f32::from(event.position.x), f32::from(event.position.y)];
+        let board = self.library.board_mut();
+        match self.gesture.as_mut().unwrap() {
+            Gesture::Pan { start, camera } => {
+                board.camera.x = camera.x + p[0] - start[0];
+                board.camera.y = camera.y + p[1] - start[1];
+            }
+            Gesture::Move { start, positions } => {
+                let delta = [
+                    (p[0] - start[0]) / board.camera.zoom,
+                    (p[1] - start[1]) / board.camera.zoom,
+                ];
+                for (id, x, y) in positions {
+                    if let Some(item) = board.images.iter_mut().find(|i| i.id == *id) {
+                        item.x = *x + delta[0];
+                        item.y = *y + delta[1];
+                    }
+                }
+            }
+            Gesture::Resize { start, id, size } => {
+                let delta = [
+                    (p[0] - start[0]) / board.camera.zoom,
+                    (p[1] - start[1]) / board.camera.zoom,
+                ];
+                if let Some(item) = board.images.iter_mut().find(|i| i.id == *id) {
+                    item.resize(*size, delta);
+                }
+            }
+            Gesture::Marquee { end, .. } => *end = p,
+        }
+        cx.notify();
+    }
+
+    fn finish_gesture(&mut self, cx: &mut Context<Self>) {
+        if let Some(Gesture::Marquee { start, end }) = &self.gesture {
+            let board = self.library.board();
+            let a = board.camera.world(*start);
+            let b = board.camera.world(*end);
+            for item in &board.images {
+                if item.x < a[0].max(b[0])
+                    && item.x + item.width > a[0].min(b[0])
+                    && item.y < a[1].max(b[1])
+                    && item.y + item.height > a[1].min(b[1])
+                {
+                    self.selected.insert(item.id);
+                }
+            }
+        }
+        if let Some(before) = self.before_gesture.take()
+            && before != self.library
+        {
+            self.history.checkpoint(&before);
+        }
+        if self.gesture.take().is_some() {
+            self.save(cx);
+        }
+    }
+
+    fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() || self.gesture.is_some() {
+            return;
+        }
+        let delta = event.delta.pixel_delta(px(28.0));
+        let camera = &mut self.library.board_mut().camera;
+        if event.modifiers.control
+            || event.modifiers.platform
+            || !event.delta.precise() && !event.modifiers.shift
+        {
+            camera.zoom_at(
+                [f32::from(event.position.x), f32::from(event.position.y)],
+                camera.zoom * (f32::from(delta.y) * 0.003).exp(),
+            );
+        } else if event.modifiers.shift && !event.delta.precise() {
+            camera.x += f32::from(delta.y);
+        } else {
+            camera.x += f32::from(delta.x);
+            camera.y += f32::from(delta.y);
+        }
+        self.save(cx);
+    }
+
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        if self.rename.is_some() {
+            match key {
+                "enter" => self.finish_rename(window, cx),
+                "escape" => {
+                    self.rename = None;
+                    self.focus.focus(window);
+                    cx.notify();
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
+        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        if command {
+            match key {
+                "n" => self.new_board(window, cx),
+                "o" | "i" => self.choose_images(cx),
+                "v" => self.paste(cx),
+                "a" => {
+                    self.selected = self.library.board().images.iter().map(|i| i.id).collect();
+                    cx.notify();
+                }
+                "d" => self.duplicate(cx),
+                "z" | "y" => {
+                    self.finish_gesture(cx);
+                    if event.keystroke.modifiers.shift || key == "y" {
+                        self.history.redo(&mut self.library);
+                    } else {
+                        self.history.undo(&mut self.library);
+                    }
+                    self.selected.clear();
+                    self.save(cx);
+                }
+                "s" => self.save(cx),
+                "q" => {
+                    if self.prepare_close(cx) {
+                        cx.quit();
+                    }
+                }
+                _ => return,
+            }
+        } else {
+            match key {
+                "space" => {
+                    self.space = true;
+                    cx.notify();
+                }
+                "h" => {
+                    self.hand = true;
+                    cx.notify();
+                }
+                "v" => {
+                    self.hand = false;
+                    cx.notify();
+                }
+                "f" | "1" => self.fit(cx),
+                "0" => {
+                    let zoom = self.library.board().camera.zoom;
+                    self.zoom(1.0 / zoom, cx);
+                }
+                "=" | "+" => self.zoom(1.2, cx),
+                "-" => self.zoom(1.0 / 1.2, cx),
+                "backspace" | "delete" => self.delete_selection(cx),
+                "f2" => self.rename_board(window, cx),
+                "escape" => {
+                    if let Some(before) = self.before_gesture.take() {
+                        self.library = before;
+                    }
+                    self.gesture = None;
+                    self.selected.clear();
+                    self.boards_open = false;
+                    self.help_open = false;
+                    self.space = false;
+                    cx.notify();
+                }
+                "?" | "/" => {
+                    self.help_open = !self.help_open;
+                    cx.notify();
+                }
+                _ => return,
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    fn button(id: &'static str, label: impl Into<SharedString>) -> Stateful<Div> {
+        div()
+            .id(id)
+            .h(px(34.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.0))
+            .text_size(px(12.0))
+            .text_color(rgb(TEXT))
+            .cursor_pointer()
+            .hover(move |s| {
+                s.bg(rgb(if matches!(id, "add-images" | "save-name") {
+                    0xd5e2c8
+                } else {
+                    0x323537
+                }))
+            })
+            .child(label.into())
+    }
+
+    fn panel() -> Div {
+        div()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .rounded(px(12.0))
+            .shadow_lg()
+    }
+
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .top(px(22.0))
+            .left(px(24.0))
+            .right(px(24.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(18.0))
+                    .child(
+                        div()
+                            .w(px(88.0))
+                            .text_size(px(24.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(TEXT))
+                            .child("magpie"),
+                    )
+                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(BORDER)))
+                    .child(
+                        Self::panel()
+                            .id("board-switcher")
+                            .rounded(px(8.0))
+                            .shadow_none()
+                            .flex()
+                            .items_center()
+                            .px(px(4.0))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Self::button(
+                                    "boards",
+                                    format!("{}   ⌄", self.library.board().name),
+                                )
+                                .max_w(px(280.0))
+                                .overflow_hidden()
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.boards_open = !this.boards_open;
+                                        this.help_open = false;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(div().h(px(16.0)).w(px(1.0)).bg(rgb(BORDER)))
+                            .child(Self::button("new-board", "+").text_size(px(20.0)).on_click(
+                                cx.listener(|this, _, window, cx| this.new_board(window, cx)),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(14.0))
+                    .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
+                        if self.importing {
+                            "Adding images…"
+                        } else if self.dirty {
+                            "Saving…"
+                        } else {
+                            "Saved locally"
+                        },
+                    ))
+                    .child(
+                        Self::button("add-images", "+  Add images")
+                            .h(px(38.0))
+                            .px(px(16.0))
+                            .bg(rgb(ACCENT))
+                            .text_color(rgb(0x20271e))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_images(cx))),
+                    ),
+            )
+    }
+
+    fn board_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Self::panel()
+            .id("board-menu")
+            .absolute()
+            .left(px(149.0))
+            .top(px(72.0))
+            .w(px(286.0))
+            .p(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .text_size(px(10.0))
+                    .text_color(rgb(MUTED))
+                    .child("YOUR BOARDS"),
+            )
+            .child(
+                div()
+                    .id("board-list")
+                    .max_h(px(300.0))
+                    .overflow_y_scroll()
+                    .children(self.library.boards.iter().map(|board| {
+                        let id = board.id;
+                        div()
+                            .id(SharedString::from(id.to_string()))
+                            .h(px(48.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .rounded(px(7.0))
+                            .cursor_pointer()
+                            .when(id == self.library.active, |s| s.bg(rgb(0x30352e)))
+                            .hover(|s| s.bg(rgb(0x343739)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(3.0))
+                                    .overflow_hidden()
+                                    .child(div().text_size(px(12.0)).child(board.name.clone()))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(MUTED))
+                                            .child(format!("{} images", board.images.len())),
+                                    ),
+                            )
+                            .when(id == self.library.active, |s| {
+                                s.child(div().text_color(rgb(ACCENT)).child("•"))
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.switch_board(id, window, cx)
+                            }))
+                    })),
+            )
+            .child(div().h(px(1.0)).my(px(5.0)).bg(rgb(BORDER)))
+            .child(
+                Self::button("menu-new", "+  New board                         ⌘/Ctrl N")
+                    .justify_start()
+                    .on_click(cx.listener(|this, _, window, cx| this.new_board(window, cx))),
+            )
+            .child(
+                Self::button("rename", "Rename board")
+                    .justify_start()
+                    .on_click(cx.listener(|this, _, window, cx| this.rename_board(window, cx))),
+            )
+            .child(
+                Self::button("delete-board", "Delete board")
+                    .justify_start()
+                    .text_color(rgb(0xbc9691))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.checkpoint();
+                        this.library.delete_active();
+                        this.selected.clear();
+                        this.boards_open = false;
+                        this.save(cx);
+                        this.toast("Board deleted · Ctrl/Cmd+Z to undo", cx);
+                    })),
+            )
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .bottom(px(24.0))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                Self::panel()
+                    .id("toolbar")
+                    .flex()
+                    .items_center()
+                    .p(px(5.0))
+                    .gap(px(3.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Self::button("select-tool", "↖")
+                            .text_size(px(18.0))
+                            .when(!self.hand, |s| s.bg(rgb(0x363b32)).text_color(rgb(ACCENT)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hand = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Self::button("pan-tool", "Pan")
+                            .when(self.hand, |s| s.bg(rgb(0x363b32)).text_color(rgb(ACCENT)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hand = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().w(px(1.0)).h(px(20.0)).mx(px(4.0)).bg(rgb(BORDER)))
+                    .child(
+                        Self::button("zoom-out", "−")
+                            .text_size(px(18.0))
+                            .on_click(cx.listener(|this, _, _, cx| this.zoom(1.0 / 1.2, cx))),
+                    )
+                    .child(
+                        Self::button(
+                            "zoom-reset",
+                            format!(
+                                "{}%",
+                                (self.library.board().camera.zoom * 100.0).round() as i32
+                            ),
+                        )
+                        .w(px(58.0))
+                        .px_0()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let zoom = this.library.board().camera.zoom;
+                            this.zoom(1.0 / zoom, cx);
+                        })),
+                    )
+                    .child(
+                        Self::button("zoom-in", "+")
+                            .text_size(px(18.0))
+                            .on_click(cx.listener(|this, _, _, cx| this.zoom(1.2, cx))),
+                    )
+                    .child(div().w(px(1.0)).h(px(20.0)).mx(px(4.0)).bg(rgb(BORDER)))
+                    .child(
+                        Self::button("fit", "Fit")
+                            .on_click(cx.listener(|this, _, _, cx| this.fit(cx))),
+                    ),
+            )
+    }
+
+    fn empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(18.0))
+            .child(
+                div()
+                    .relative()
+                    .w(px(108.0))
+                    .h(px(80.0))
+                    .mb(px(12.0))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(3.0))
+                            .top(px(13.0))
+                            .w(px(52.0))
+                            .h(px(60.0))
+                            .bg(rgb(0x212528))
+                            .border_1()
+                            .border_color(rgb(0x3a4143))
+                            .rounded(px(6.0)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(46.0))
+                            .top_0()
+                            .w(px(58.0))
+                            .h(px(72.0))
+                            .bg(rgb(0x2d332c))
+                            .border_1()
+                            .border_color(rgb(0x555f50))
+                            .rounded(px(6.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(ACCENT))
+                            .text_size(px(26.0))
+                            .child("+"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(25.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("A little space for your ideas."),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(MUTED))
+                    .child("Drop images anywhere. Make room for what inspires you."),
+            )
+            .child(
+                Self::button("empty-add", "Choose images   ↗")
+                    .mt(px(5.0))
+                    .border_1()
+                    .border_color(rgb(0x454b42))
+                    .text_color(rgb(ACCENT))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_images(cx))),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(0x666d6b))
+                    .child("PNG, JPG, WEBP, GIF, BMP, TIFF  ·  or paste an image"),
+            )
+    }
+
+    fn rename_modal(&self, input: Entity<TextInput>, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .absolute()
+            .size_full()
+            .bg(rgba(0x00000088))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Self::panel()
+                    .w(px(380.0))
+                    .p(px(24.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(18.0))
+                    .child(div().text_size(px(18.0)).child("Name your board"))
+                    .child(
+                        div()
+                            .border_1()
+                            .border_color(rgb(0x65715c))
+                            .rounded(px(6.0))
+                            .p(px(5.0))
+                            .child(input),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(
+                                Self::button("cancel-rename", "Cancel").on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.rename = None;
+                                        this.focus.focus(window);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                Self::button("save-name", "Save name")
+                                    .bg(rgb(ACCENT))
+                                    .text_color(rgb(0x20271e))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.finish_rename(window, cx)
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    fn help(&self) -> impl IntoElement {
+        let shortcuts = [
+            ("New board", "Ctrl / ⌘ N"),
+            ("Add images", "Ctrl / ⌘ O"),
+            ("Paste image", "Ctrl / ⌘ V"),
+            ("Pan canvas", "Drag empty space / Space + drag"),
+            ("Zoom", "Wheel / Ctrl + two-finger scroll"),
+            ("Select several", "Shift + click / Shift + drag"),
+            ("Resize image", "Drag the bottom-right handle"),
+            ("Fit everything", "F"),
+            ("Actual size", "0"),
+            ("Duplicate", "Ctrl / ⌘ D"),
+            ("Delete selection", "Delete / Backspace"),
+            ("Undo / redo", "Ctrl / ⌘ Z / Shift Z"),
+            ("Rename board", "F2"),
+        ];
+        Self::panel()
+            .absolute()
+            .right(px(24.0))
+            .bottom(px(76.0))
+            .w(px(410.0))
+            .p(px(22.0))
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .mb(px(5.0))
+                    .child("Make yourself at home"),
+            )
+            .children(shortcuts.map(|(name, key)| {
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_size(px(11.0))
+                    .child(div().text_color(rgb(MUTED)).child(name))
+                    .child(key)
+            }))
+    }
+}
+
+impl Render for Magpie {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport = [
+            f32::from(window.viewport_size().width),
+            f32::from(window.viewport_size().height),
+        ];
+        let board = self.library.board();
+        let camera = board.camera;
+        let viewport = self.viewport;
+        let panning = self.space || self.hand || matches!(self.gesture, Some(Gesture::Pan { .. }));
+        let mut root = div()
+            .id("magpie")
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .bg(rgb(BG))
+            .text_color(rgb(TEXT))
+            .font_family("Inter")
+            .track_focus(&self.focus)
+            .cursor(if self.gesture.is_some() {
+                CursorStyle::ClosedHand
+            } else if panning {
+                CursorStyle::OpenHand
+            } else {
+                CursorStyle::Arrow
+            })
+            .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
+                if event.keystroke.key == "space" {
+                    this.space = false;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
+            .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_gesture(cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, _, _, cx| this.finish_gesture(cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| this.finish_gesture(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_gesture(cx)),
+            )
+            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let p = window.mouse_position();
+                this.import_paths(paths.paths().to_vec(), [f32::from(p.x), f32::from(p.y)], cx);
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0x20271f)))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        let spacing = if camera.zoom < 0.4 { 160.0 } else { 48.0 } * camera.zoom;
+                        let mut x = camera.x.rem_euclid(spacing);
+                        while x < viewport[0] {
+                            let mut y = camera.y.rem_euclid(spacing);
+                            while y < viewport[1] {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(bounds.left() + px(x), bounds.top() + px(y)),
+                                        size(px(1.0), px(1.0)),
+                                    ),
+                                    rgb(0x303437),
+                                ));
+                                y += spacing;
+                            }
+                            x += spacing;
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+
+        for item in &board.images {
+            let p = camera.screen([item.x, item.y]);
+            let w = item.width * camera.zoom;
+            let h = item.height * camera.zoom;
+            if p[0] + w < -20.0
+                || p[1] + h < -20.0
+                || p[0] > viewport[0] + 20.0
+                || p[1] > viewport[1] + 20.0
+            {
+                continue;
+            }
+            let selected = self.selected.contains(&item.id);
+            root = root.child(
+                div()
+                    .absolute()
+                    .left(px(p[0]))
+                    .top(px(p[1]))
+                    .w(px(w))
+                    .h(px(h))
+                    .bg(rgb(0x25282a))
+                    .shadow_lg()
+                    .child(
+                        img(self.storage.asset(&item.asset))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain),
+                    ),
+            );
+            if selected {
+                root = root.child(
+                    div()
+                        .absolute()
+                        .left(px(p[0] - 3.0))
+                        .top(px(p[1] - 3.0))
+                        .w(px(w + 6.0))
+                        .h(px(h + 6.0))
+                        .border_1()
+                        .border_color(rgb(ACCENT)),
+                );
+                if self.selected.len() == 1 {
+                    root = root.child(
+                        div()
+                            .absolute()
+                            .left(px(p[0] + w - 4.0))
+                            .top(px(p[1] + h - 4.0))
+                            .size(px(8.0))
+                            .bg(rgb(ACCENT))
+                            .border_1()
+                            .border_color(rgb(BG))
+                            .cursor(CursorStyle::ResizeUpLeftDownRight),
+                    );
+                }
+            }
+        }
+        if let Some(Gesture::Marquee { start, end }) = self.gesture {
+            root = root.child(
+                div()
+                    .absolute()
+                    .left(px(start[0].min(end[0])))
+                    .top(px(start[1].min(end[1])))
+                    .w(px((end[0] - start[0]).abs()))
+                    .h(px((end[1] - start[1]).abs()))
+                    .bg(rgba(0xc6d5b512))
+                    .border_1()
+                    .border_color(rgb(ACCENT)),
+            );
+        }
+        if board.images.is_empty() {
+            root = root.child(self.empty(cx));
+        }
+        root = root
+            .child(self.header(cx))
+            .child(self.toolbar(cx))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(24.0))
+                    .bottom(px(34.0))
+                    .text_size(px(11.0))
+                    .text_color(rgb(MUTED))
+                    .child(if self.selected.is_empty() {
+                        format!("{} images  ·  Infinite canvas", board.images.len())
+                    } else {
+                        format!("{} selected  ·  Del to remove", self.selected.len())
+                    }),
+            )
+            .child(
+                Self::button("help", "?")
+                    .absolute()
+                    .right(px(24.0))
+                    .bottom(px(26.0))
+                    .w(px(34.0))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_color(rgb(MUTED))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.help_open = !this.help_open;
+                        this.boards_open = false;
+                        cx.notify();
+                    })),
+            );
+        if self.boards_open {
+            root = root.child(self.board_menu(cx));
+        }
+        if self.help_open {
+            root = root.child(self.help());
+        }
+        if let Some(message) = &self.message {
+            root = root.child(
+                div()
+                    .absolute()
+                    .bottom(px(88.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        Self::panel()
+                            .px(px(18.0))
+                            .py(px(10.0))
+                            .max_w(px(700.0))
+                            .text_size(px(12.0))
+                            .child(message.clone()),
+                    ),
+            );
+        }
+        if let Some(input) = &self.rename {
+            root = root.child(self.rename_modal(input.clone(), cx));
+        }
+        root
+    }
+}
