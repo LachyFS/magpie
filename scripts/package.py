@@ -113,7 +113,9 @@ def package(target, binary, output):
     for path in artifacts:
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(stream.read()).hexdigest()
-        path.with_name(path.name + ".sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
+        # GNU sha256sum treats CRLF's CR as part of the filename on older Linux
+        # releases, so checksums must use LF even when packaged on Windows.
+        path.with_name(path.name + ".sha256").write_bytes(f"{digest}  {path.name}\n".encode("utf-8"))
         print(path)
 
 

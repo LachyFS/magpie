@@ -61,7 +61,7 @@ jobs:
       - name: Verify all downloads
         working-directory: dist
         run: |
-          cat ./*.sha256 | sort -k2 > SHA256SUMS.txt
+          cat ./*.sha256 | tr -d '\r' | sort -k2 > SHA256SUMS.txt
           test "$(wc -l < SHA256SUMS.txt)" -eq 5
           sha256sum --check SHA256SUMS.txt
           rm -- *.sha256
