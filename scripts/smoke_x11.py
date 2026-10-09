@@ -43,7 +43,7 @@ def run():
             data = Path(temporary)
             env["MAGPIE_DATA_DIR"] = str(data / "library")
             log = open(data / "app.log", "w+")
-            binary = str(ROOT / "target/debug/magpie")
+            binary = os.environ.get("MAGPIE_BINARY", str(ROOT / "target/debug/magpie"))
 
             def x(*args):
                 subprocess.run([executable("xdotool"), *map(str, args)], env=env, check=True, stdout=subprocess.DEVNULL)

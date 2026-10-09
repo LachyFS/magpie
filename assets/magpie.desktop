@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Magpie
+Comment=Collect what catches your eye
+Exec=magpie %F
+Icon=magpie
+Terminal=false
+Categories=Graphics;Photography;
+StartupWMClass=app.magpie.Magpie

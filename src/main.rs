@@ -6,12 +6,21 @@ use magpie::storage::Storage;
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    match arguments.first().and_then(|arg| arg.to_str()) {
+        Some("--version" | "-V") => {
+            println!("Magpie {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--help" | "-h") => {
+            println!("Magpie {}\n\nUsage: magpie [IMAGE ...]\n\n  --version, -V    Print the version\n  --help, -h       Show this help\n\nSet MAGPIE_DATA_DIR to use a separate local library.", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
+    let paths = arguments.into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
     let storage = Storage::open(None)?;
     let library = storage.load()?;
-    let paths = std::env::args_os()
-        .skip(1)
-        .map(std::path::PathBuf::from)
-        .collect::<Vec<_>>();
     Application::new().run(move |cx: &mut App| {
         input::init(cx);
         cx.on_window_closed(|cx| {
@@ -47,3 +56,4 @@ fn main() -> anyhow::Result<()> {
     });
     Ok(())
 }
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]

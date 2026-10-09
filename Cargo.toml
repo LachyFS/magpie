@@ -23,6 +23,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 unicode-segmentation = { version = "1", optional = true }
 env_logger = { version = "0.11", optional = true }
 
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
 [[bin]]
 name = "magpie"
 path = "src/main.rs"

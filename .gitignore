@@ -1,6 +1,7 @@
 /target/
 /.local/
 /artifacts/
+/dist/
 __pycache__/
 .env
 .env.*

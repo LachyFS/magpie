@@ -1,0 +1,94 @@
+name: Build packages
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: '2'
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: '1.98.1'
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype-dev libssl-dev libvulkan1 mesa-vulkan-drivers xvfb xdotool python3-xlib python3-pil
+      - name: Find the Windows shader compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $compiler = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $compiler) { throw "The Windows SDK shader compiler is missing" }
+          "GPUI_FXC_PATH=$($compiler.FullName)" >> $env:GITHUB_ENV
+      - name: Check formatting and tests
+        run: |
+          cargo fmt --check
+          cargo test --locked --no-default-features --lib
+      - name: Build optimized binary
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$BUILD_TARGET"
+      - name: Check Linux lints
+        if: runner.os == 'Linux'
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Package downloads
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: python3 scripts/package.py --target "$BUILD_TARGET"
+      - name: Test the packaged Linux app
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p artifacts/package-test
+          tar -xzf dist/magpie-*-linux-x86_64.tar.gz -C artifacts/package-test
+          export MAGPIE_BINARY="$(realpath artifacts/package-test/magpie-*/magpie)"
+          "$MAGPIE_BINARY" --version
+          /usr/bin/python3 scripts/smoke_x11.py
+          dpkg-deb --info dist/*.deb
+      - name: Upload packages and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: magpie-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
