@@ -29,6 +29,8 @@ def copy_docs(destination):
     for name in ["README.md", "LICENSE", "NOTICE"]:
         shutil.copy2(ROOT / name, destination / name)
     shutil.copytree(ROOT / "docs", destination / "docs")
+    (destination / "assets").mkdir()
+    shutil.copy2(ROOT / "assets/magpie-256.png", destination / "assets/magpie-256.png")
 
 
 def package(target, binary, output):
@@ -44,7 +46,7 @@ def package(target, binary, output):
             shutil.copy2(binary, bundle / "magpie")
             (bundle / "magpie").chmod(0o755)
             copy_docs(bundle)
-            for name in ["magpie.svg", "magpie.png", "magpie.desktop"]:
+            for name in ["magpie.png", "magpie.desktop"]:
                 shutil.copy2(ROOT / "assets" / name, bundle / name)
             archive = output / f"{stem}.tar.gz"
             with tarfile.open(archive, "w:gz") as tar:
@@ -52,12 +54,12 @@ def package(target, binary, output):
             artifacts.append(archive)
 
             deb = work / "deb"
-            for relative in ["DEBIAN", "usr/bin", "usr/share/applications", "usr/share/icons/hicolor/256x256/apps", "usr/share/icons/hicolor/scalable/apps", "usr/share/doc/magpie"]:
+            for relative in ["DEBIAN", "usr/bin", "usr/share/applications", "usr/share/icons/hicolor/256x256/apps", "usr/share/icons/hicolor/1024x1024/apps", "usr/share/doc/magpie"]:
                 (deb / relative).mkdir(parents=True)
             shutil.copy2(bundle / "magpie", deb / "usr/bin/magpie")
             shutil.copy2(ROOT / "assets/magpie.desktop", deb / "usr/share/applications/app.magpie.Magpie.desktop")
             shutil.copy2(ROOT / "assets/magpie-256.png", deb / "usr/share/icons/hicolor/256x256/apps/magpie.png")
-            shutil.copy2(ROOT / "assets/magpie.svg", deb / "usr/share/icons/hicolor/scalable/apps/magpie.svg")
+            shutil.copy2(ROOT / "assets/magpie.png", deb / "usr/share/icons/hicolor/1024x1024/apps/magpie.png")
             copy_docs(deb / "usr/share/doc/magpie")
             installed_kib = (sum(p.stat().st_size for p in (deb / "usr").rglob("*") if p.is_file()) + 1023) // 1024
             versions = re.findall(r"GLIBC_(\d+)\.(\d+)", subprocess.check_output(["readelf", "--version-info", str(binary)], text=True))

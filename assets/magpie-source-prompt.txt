@@ -1,0 +1,9 @@
+Use case: logo-brand
+Asset type: one polished square app icon for Magpie, a minimalist native infinite mood-board app for collecting images.
+Primary request: “Collector”: a friendly sophisticated black-and-white magpie in side profile holding one tiny sage-green image card in its beak; a playful independent Mac app identity.
+Backdrop: a perfectly clean warm-cream rounded-square tile, almost filling the square canvas, with genuinely transparent pixels outside its rounded corners. The tile is precisely shaped with smooth geometric curves and flawless crisp edges; the outside transparency contains zero stray marks.
+Subject: one economical bold charcoal bird silhouette, soft curves, distinctive magpie tail, one clear ivory wing patch and a small ivory eye. A small muted-sage image card with a simple ivory landscape symbol is held at the beak. Reduce all forms to a few strong shapes.
+Style: flat vector-like logo, elegant minimalist brand mark. Use completely solid flat fills, uniform edge-to-edge colors with no lighting or shading. Smooth precision curves, simple leg shapes.
+Composition: exactly one icon, visually balanced and optically centered; generous breathing room within tile, strong readability at 32px.
+Palette: warm cream, solid charcoal, ivory, muted sage.
+Constraints: Square image with actual alpha transparency outside the cream rounded tile. No gradients, texture, paper grain, rough or hand-drawn edges, stray marks, tiny feather details, badges, sparkles, words, lettering, watermark, shadows, mockup, or contact sheet.

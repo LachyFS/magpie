@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Convert the source SVG into platform icons. Requires cairosvg and Pillow."""
+"""Export the selected Collector artwork as platform icons. Requires Pillow."""
 from pathlib import Path
-import cairosvg
 from PIL import Image
 
 assets = Path(__file__).resolve().parents[1] / "assets"
-cairosvg.svg2png(url=str(assets / "magpie.svg"), write_to=str(assets / "magpie.png"))
-cairosvg.svg2png(url=str(assets / "magpie.svg"), write_to=str(assets / "magpie-256.png"), output_width=256, output_height=256)
-with Image.open(assets / "magpie.png") as icon:
+with Image.open(assets / "magpie-source.png") as source:
+    if source.width != source.height:
+        raise ValueError("The app icon source must be square")
+    icon = source.convert("RGBA").resize((1024, 1024), Image.Resampling.LANCZOS)
+    icon.save(assets / "magpie.png")
+    icon.resize((256, 256), Image.Resampling.LANCZOS).save(assets / "magpie-256.png")
     icon.save(assets / "magpie.ico", sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     icon.save(assets / "magpie.icns")

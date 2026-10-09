@@ -1,3 +1,5 @@
+<img src="assets/magpie-256.png" width="96" height="96" alt="Magpie: a bird carrying an image card">
+
 # Magpie
 
 [![CI](https://github.com/LachyFS/magpie/actions/workflows/ci.yml/badge.svg)](https://github.com/LachyFS/magpie/actions/workflows/ci.yml)

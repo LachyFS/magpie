@@ -14,4 +14,4 @@ The script uses the same Xvfb, xdotool, Python Xlib, and Pillow dependencies as 
 - [Alpine lake photograph](https://images.unsplash.com/photo-1493246507139-91e8fad9978e)
 - [Night mountain photograph](https://images.unsplash.com/photo-1519681393784-d120267933ba)
 
-The photos are demo content only and are not bundled with the app. The Magpie icon is an original SVG in `assets/magpie.svg`; its PNG, ICO, and ICNS exports are generated with `scripts/generate_icons.py` using CairoSVG and Pillow.
+The photos are demo content only and are not bundled with the app. The Magpie icon uses the selected Collector artwork in `assets/magpie-source.png`; its PNG, ICO, and ICNS exports are generated with `scripts/generate_icons.py` using Pillow. See `assets/README.md` in the source tree for icon source and export instructions.
