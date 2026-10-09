@@ -4,7 +4,10 @@
 )]
 
 mod app;
+mod canvas_image;
 mod input;
+#[cfg(target_os = "macos")]
+mod macos_gestures;
 
 use gpui::{prelude::*, *};
 use magpie::storage::Storage;

@@ -1,14 +1,16 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const MIN_ZOOM: f32 = 0.08;
-pub const MAX_ZOOM: f32 = 6.0;
+// Numerical guardrails, not preset limits. Double precision preserves navigation
+// far beyond the old 8%–600% range while keeping GPU coordinates finite.
+pub const MIN_ZOOM: f64 = 1e-9;
+pub const MAX_ZOOM: f64 = 1e9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
-    pub x: f32,
-    pub y: f32,
-    pub zoom: f32,
+    pub x: f64,
+    pub y: f64,
+    pub zoom: f64,
 }
 
 impl Default for Camera {
@@ -22,25 +24,28 @@ impl Default for Camera {
 }
 
 impl Camera {
-    pub fn world(&self, screen: [f32; 2]) -> [f32; 2] {
+    pub fn world(&self, screen: [f64; 2]) -> [f64; 2] {
         [
             (screen[0] - self.x) / self.zoom,
             (screen[1] - self.y) / self.zoom,
         ]
     }
 
-    pub fn screen(&self, world: [f32; 2]) -> [f32; 2] {
+    pub fn screen(&self, world: [f64; 2]) -> [f64; 2] {
         [world[0] * self.zoom + self.x, world[1] * self.zoom + self.y]
     }
 
-    pub fn zoom_at(&mut self, screen: [f32; 2], zoom: f32) {
+    pub fn zoom_at(&mut self, screen: [f64; 2], zoom: f64) {
+        if !zoom.is_finite() || zoom <= 0.0 || !screen.iter().all(|v| v.is_finite()) {
+            return;
+        }
         let world = self.world(screen);
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         self.x = screen[0] - world[0] * self.zoom;
         self.y = screen[1] - world[1] * self.zoom;
     }
 
-    pub fn fit(&mut self, items: &[ImageItem], viewport: [f32; 2]) {
+    pub fn fit(&mut self, items: &[ImageItem], viewport: [f64; 2]) {
         let Some(first) = items.first() else {
             *self = Self::default();
             return;
@@ -63,7 +68,7 @@ impl Camera {
         ];
         self.zoom = (available[0] / (bounds[2] - bounds[0]))
             .min(available[1] / (bounds[3] - bounds[1]))
-            .clamp(MIN_ZOOM, 1.5);
+            .clamp(MIN_ZOOM, MAX_ZOOM);
         self.x = viewport[0] / 2.0 - (bounds[0] + bounds[2]) / 2.0 * self.zoom;
         self.y = viewport[1] / 2.0 - (bounds[1] + bounds[3]) / 2.0 * self.zoom;
     }
@@ -75,21 +80,21 @@ pub struct ImageItem {
     pub asset: String,
     pub original: String,
     pub name: String,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 impl ImageItem {
-    pub fn contains(&self, p: [f32; 2]) -> bool {
+    pub fn contains(&self, p: [f64; 2]) -> bool {
         p[0] >= self.x
             && p[0] <= self.x + self.width
             && p[1] >= self.y
             && p[1] <= self.y + self.height
     }
 
-    pub fn resize(&mut self, initial: [f32; 2], delta: [f32; 2]) {
+    pub fn resize(&mut self, initial: [f64; 2], delta: [f64; 2]) {
         let ratio = initial[1] / initial[0];
         let width = if delta[0].abs() >= delta[1].abs() {
             initial[0] + delta[0]
@@ -272,13 +277,47 @@ mod tests {
         };
         let cursor = [750.0, 220.0];
         let world = camera.world(cursor);
-        for zoom in [1.3, 0.0001, 100.0] {
+        for zoom in [1.3, MIN_ZOOM / 100.0, MAX_ZOOM * 100.0] {
             camera.zoom_at(cursor, zoom);
             let after = camera.world(cursor);
-            assert!((world[0] - after[0]).abs() < 0.01 && (world[1] - after[1]).abs() < 0.01);
+            assert!((world[0] - after[0]).abs() < 0.001 && (world[1] - after[1]).abs() < 0.001);
             assert!((MIN_ZOOM..=MAX_ZOOM).contains(&camera.zoom));
         }
     }
+    #[test]
+    fn invalid_zoom_input_does_not_corrupt_the_camera() {
+        let initial = Camera::default();
+        for zoom in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            let mut camera = initial;
+            camera.zoom_at([300.0, 500.0], zoom);
+            assert_eq!(camera, initial);
+        }
+    }
+
+    #[test]
+    fn extreme_camera_coordinates_survive_persistence() {
+        let mut library = Library::default();
+        library.board_mut().camera = Camera {
+            x: -392.45781771469433,
+            y: 161.39645479252678,
+            zoom: 1.6046128816099652,
+        };
+        let restored: Library =
+            serde_json::from_str(&serde_json::to_string(&library).unwrap()).unwrap();
+        assert_eq!(
+            restored, library,
+            "Fractional camera coordinates roundtrip exactly"
+        );
+        library.board_mut().camera.zoom_at([730.0, 260.0], MAX_ZOOM);
+        library.validate().unwrap();
+        let restored: Library =
+            serde_json::from_str(&serde_json::to_string(&library).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored, library);
+        library.board_mut().camera.zoom_at([730.0, 260.0], MIN_ZOOM);
+        library.validate().unwrap();
+    }
+
     #[test]
     fn fit_centers_content_with_negative_coordinates() {
         let item = item();

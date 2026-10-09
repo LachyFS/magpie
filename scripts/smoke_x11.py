@@ -104,7 +104,7 @@ def run():
                 raise AssertionError("Window never appeared")
 
             def state():
-                time.sleep(0.5)  # Wait for debounced persistence, not just a paint.
+                time.sleep(0.75)  # Include the zoom animation and debounced persistence.
                 manifest = data / "library/boards.json"
                 for _ in range(50):
                     if manifest.exists():
@@ -233,7 +233,54 @@ def run():
             camera = board()["camera"]
             assert abs(camera["x"] - b["camera"]["x"] - 80) < 2, "Canvas pan"
             x("mousemove", 640, 410, "click", 4)
-            assert board()["camera"]["zoom"] > camera["zoom"], "Wheel zoom"
+            panned = board()["camera"]
+            assert panned["zoom"] == camera["zoom"] and panned["y"] != camera["y"], "Wheel pans"
+            x("keydown", "shift", "click", 4, "keyup", "shift")
+            horizontal = board()["camera"]
+            assert horizontal["x"] != panned["x"] and horizontal["y"] == panned["y"], "Shift-wheel pans horizontally"
+            panned = horizontal
+            x("keydown", "ctrl", "click", 4, "keyup", "ctrl")
+            zoomed = board()["camera"]
+            assert zoomed["zoom"] > panned["zoom"], "Ctrl-wheel zoom"
+            for axis, point in [("x", 640), ("y", 410)]:
+                assert abs((point - panned[axis]) / panned["zoom"] - (point - zoomed[axis]) / zoomed["zoom"]) < 0.02, ("Zoom stays anchored to the pointer", axis, panned, zoomed)
+            x("key", "shift+0")
+            assert abs(board()["camera"]["zoom"] - 1) < 0.000001, "Actual size shortcut"
+            x("key", "ctrl+plus")
+            assert board()["camera"]["zoom"] == 1.25, "Zoom in shortcut"
+            x("key", "ctrl+minus")
+            assert board()["camera"]["zoom"] == 1, "Zoom out shortcut"
+            x("key", "shift+1")
+            fitted = board()
+            item = fitted["images"][0]
+            center = screen(fitted, item)
+            x("mousemove", *center, "click", 1)
+            x("key", "shift+2")
+            selected = board()
+            assert max(abs(a - b) for a, b in zip(screen(selected, selected["images"][0]), [640, 410])) < 2, "Fit selection centers the selected image"
+
+            def enter_zoom(value):
+                x("mousemove", 656, 773, "click", 1)
+                time.sleep(0.2)
+                x("key", "ctrl+a")
+                x("type", "--clearmodifiers", value)
+                x("key", "Return")
+                return board()["camera"]
+
+            assert enter_zoom("125% ")["zoom"] == 1.25, "Editable zoom percentage"
+            # Invalid text keeps the input open, without mutating the camera.
+            assert enter_zoom("NaN")["zoom"] == 1.25, "Invalid zoom is rejected"
+            x("key", "Escape")
+            x("key", "shift+2")
+            board()
+            for value, expected in [("1000000%", 10000), ("1e11%", 1e9)]:
+                assert enter_zoom(value)["zoom"] == expected, "Zoom far beyond the old upper cap"
+                # The selected solid-color image must still cover the viewport.
+                pixel = ImageGrab.grab(xdisplay=env["DISPLAY"]).getpixel((640, 410))[:3]
+                assert max(abs(a - b) for a, b in zip(pixel, (159, 174, 133))) <= 2, ("Image renders at extreme zoom", value, pixel)
+            assert abs(enter_zoom("0.00001%")["zoom"] - 1e-7) < 1e-16, "Zoom far beyond the old lower cap"
+            x("key", "shift+1")
+            board()
             x("key", "ctrl+a", "Delete")
             assert not board()["images"], "Delete multiple"
             x("key", "ctrl+z")
@@ -274,10 +321,11 @@ def run():
             x("key", "ctrl+q")
             app.wait(timeout=5)
             app, window = start()
-            assert state() == saved, "Reopen restores boards and camera positions"
+            reopened = state()
+            assert reopened == saved, ("Reopen restores boards and camera positions", saved, reopened)
             x("key", "ctrl+q")
             app.wait(timeout=5)
-            print("PASS: native board creation/rename, OS file drop, owned imports, move, resize, pan/zoom, duplicate, delete, undo/redo, clipboard paste, library locking, restart persistence")
+            print("PASS: native board creation/rename, OS file drop, owned imports, move, resize, pan, anchored zoom, zoom menu, extreme scales, fit selection, zoom shortcuts, duplicate, delete, undo/redo, clipboard paste, library locking, restart persistence")
             log.close()
     finally:
         if app and app.poll() is None:

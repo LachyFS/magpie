@@ -108,7 +108,7 @@ impl Storage {
         image
             .thumbnail(2048, 2048)
             .save_with_format(self.asset(&asset), image::ImageFormat::Png)?;
-        let scale = (360.0 / width as f32).min(420.0 / height as f32).min(1.0);
+        let scale = (360.0 / width as f64).min(420.0 / height as f64).min(1.0);
         Ok(ImageItem {
             id,
             asset,
@@ -116,8 +116,8 @@ impl Storage {
             name: name.into(),
             x: 0.0,
             y: 0.0,
-            width: width as f32 * scale,
-            height: height as f32 * scale,
+            width: width as f64 * scale,
+            height: height as f64 * scale,
         })
     }
 }

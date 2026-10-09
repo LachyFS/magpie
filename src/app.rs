@@ -1,10 +1,22 @@
 use crate::input::TextInput;
 use gpui::{prelude::*, *};
+use magpie::navigation::{CameraTransition, format_zoom, grid_spacing, parse_zoom, step_zoom};
 use magpie::{
     model::{Camera, History, ImageItem, Library},
     storage::Storage,
 };
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+fn coord(value: Pixels) -> f64 {
+    f32::from(value) as f64
+}
+fn pixels(value: f64) -> Pixels {
+    px(value as f32)
+}
 use uuid::Uuid;
 
 const BG: u32 = 0x17191b;
@@ -16,21 +28,21 @@ const ACCENT: u32 = 0xc6d5b5;
 
 enum Gesture {
     Pan {
-        start: [f32; 2],
+        start: [f64; 2],
         camera: Camera,
     },
     Move {
-        start: [f32; 2],
-        positions: Vec<(Uuid, f32, f32)>,
+        start: [f64; 2],
+        positions: Vec<(Uuid, f64, f64)>,
     },
     Resize {
-        start: [f32; 2],
+        start: [f64; 2],
         id: Uuid,
-        size: [f32; 2],
+        size: [f64; 2],
     },
     Marquee {
-        start: [f32; 2],
-        end: [f32; 2],
+        start: [f64; 2],
+        end: [f64; 2],
     },
 }
 
@@ -47,12 +59,17 @@ pub struct Magpie {
     boards_open: bool,
     help_open: bool,
     rename: Option<Entity<TextInput>>,
+    zoom_input: Option<Entity<TextInput>>,
+    zoom_error: bool,
+    motion: Option<(Instant, CameraTransition)>,
+    #[cfg(target_os = "macos")]
+    _pinch_monitor: Option<crate::macos_gestures::MagnifyMonitor>,
     importing: bool,
     save_task: Option<Task<()>>,
     dirty: bool,
     message: Option<String>,
     message_task: Option<Task<()>>,
-    viewport: [f32; 2],
+    viewport: [f64; 2],
 }
 
 impl Magpie {
@@ -89,6 +106,11 @@ impl Magpie {
             boards_open: false,
             help_open: false,
             rename: None,
+            zoom_input: None,
+            zoom_error: false,
+            motion: None,
+            #[cfg(target_os = "macos")]
+            _pinch_monitor: crate::macos_gestures::MagnifyMonitor::install(window, cx),
             importing: false,
             save_task: None,
             dirty: false,
@@ -147,6 +169,8 @@ impl Magpie {
 
     fn new_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_gesture(cx);
+        self.motion = None;
+        self.zoom_input = None;
         self.checkpoint();
         self.library.add_board();
         self.selected.clear();
@@ -158,6 +182,8 @@ impl Magpie {
 
     fn switch_board(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_gesture(cx);
+        self.motion = None;
+        self.zoom_input = None;
         self.library.active = id;
         self.selected.clear();
         self.boards_open = false;
@@ -166,6 +192,7 @@ impl Magpie {
     }
 
     fn rename_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_input = None;
         self.boards_open = false;
         let name = self.library.board().name.clone();
         let input = cx.new(|cx| TextInput::new(name, cx));
@@ -223,7 +250,7 @@ impl Magpie {
     pub fn import_paths(
         &mut self,
         paths: Vec<PathBuf>,
-        position: [f32; 2],
+        position: [f64; 2],
         cx: &mut Context<Self>,
     ) {
         if self.importing {
@@ -264,7 +291,7 @@ impl Magpie {
     fn finish_import(
         &mut self,
         board: Uuid,
-        position: [f32; 2],
+        position: [f64; 2],
         images: Vec<ImageItem>,
         errors: Vec<String>,
         cx: &mut Context<Self>,
@@ -281,7 +308,7 @@ impl Magpie {
                 .unwrap();
             let mut x = position[0];
             let mut y = position[1];
-            let mut row_height: f32 = 0.0;
+            let mut row_height: f64 = 0.0;
             if self.library.active == board {
                 self.selected.clear();
             }
@@ -402,24 +429,155 @@ impl Magpie {
         self.save(cx);
     }
 
-    fn fit(&mut self, cx: &mut Context<Self>) {
-        let board = self.library.board_mut();
-        board.camera.fit(&board.images, self.viewport);
+    fn center(&self) -> [f64; 2] {
+        [self.viewport[0] / 2.0, self.viewport[1] / 2.0]
+    }
+
+    fn target_zoom(&self) -> f64 {
+        self.motion
+            .map_or(self.library.board().camera.zoom, |(_, motion)| {
+                motion.to.zoom
+            })
+    }
+
+    fn animate_to(&mut self, to: Camera, anchor: [f64; 2], cx: &mut Context<Self>) {
+        self.motion = Some((
+            Instant::now(),
+            CameraTransition {
+                from: self.library.board().camera,
+                to,
+                anchor,
+            },
+        ));
         self.save(cx);
     }
 
-    fn zoom(&mut self, factor: f32, cx: &mut Context<Self>) {
-        let center = [self.viewport[0] / 2.0, self.viewport[1] / 2.0];
-        let camera = &mut self.library.board_mut().camera;
-        camera.zoom_at(center, camera.zoom * factor);
-        self.save(cx);
+    fn animate_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((started, transition)) = self.motion {
+            let progress = started.elapsed().as_secs_f64() / 0.16;
+            self.library.board_mut().camera = transition.sample(progress);
+            if progress >= 1.0 {
+                self.motion = None;
+                self.save(cx);
+            } else {
+                window.request_animation_frame();
+            }
+        }
+    }
+
+    fn fit(&mut self, selection: bool, cx: &mut Context<Self>) {
+        if self.gesture.is_some() {
+            return;
+        }
+        let images: Vec<_> = self
+            .library
+            .board()
+            .images
+            .iter()
+            .filter(|item| !selection || self.selected.contains(&item.id))
+            .cloned()
+            .collect();
+        if selection && images.is_empty() {
+            self.toast("Select an image to zoom to it", cx);
+            return;
+        }
+        let mut camera = self.library.board().camera;
+        camera.fit(&images, self.viewport);
+        self.animate_to(camera, self.center(), cx);
+    }
+
+    fn zoom_at(&mut self, anchor: [f64; 2], zoom: f64, smooth: bool, cx: &mut Context<Self>) {
+        if self.gesture.is_some() {
+            return;
+        }
+        let mut camera = self.library.board().camera;
+        camera.zoom_at(anchor, zoom);
+        if smooth {
+            self.animate_to(camera, anchor, cx);
+        } else {
+            self.motion = None;
+            self.library.board_mut().camera = camera;
+            self.save(cx);
+        }
+    }
+
+    fn zoom_step(&mut self, zoom_in: bool, cx: &mut Context<Self>) {
+        self.zoom_at(
+            self.center(),
+            step_zoom(self.target_zoom(), zoom_in),
+            true,
+            cx,
+        );
+    }
+
+    fn close_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_input = None;
+        self.zoom_error = false;
+        self.focus.focus(window);
+        cx.notify();
+    }
+
+    fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.zoom_input.is_some() {
+            self.close_zoom(window, cx);
+        } else {
+            let value = format_zoom(self.target_zoom());
+            let input = cx.new(|cx| TextInput::with_placeholder(value, "Zoom percentage", cx));
+            input.focus_handle(cx).focus(window);
+            self.zoom_input = Some(input);
+            self.zoom_error = false;
+            self.boards_open = false;
+            self.help_open = false;
+            cx.notify();
+        }
+    }
+
+    fn apply_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let zoom = self
+            .zoom_input
+            .as_ref()
+            .and_then(|input| parse_zoom(&input.read(cx).content));
+        if let Some(zoom) = zoom {
+            self.zoom_at(self.center(), zoom, true, cx);
+            self.close_zoom(window, cx);
+        } else {
+            self.zoom_error = true;
+            cx.notify();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn pinch(
+        &mut self,
+        anchor: [f64; 2],
+        magnification: f64,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.rename.is_some()
+            || self.zoom_input.is_some()
+            || self.gesture.is_some()
+            || self.boards_open
+            || self.help_open
+            || anchor[1] < 80.0
+            || anchor[1] > self.viewport[1] - 80.0
+        {
+            return false;
+        }
+        let factor = 1.0 + magnification;
+        if !factor.is_finite() || factor <= 0.0 {
+            return false;
+        }
+        self.zoom_at(anchor, self.library.board().camera.zoom * factor, false, cx);
+        true
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window);
+        self.zoom_input = None;
+        self.motion = None;
         self.boards_open = false;
         self.help_open = false;
-        let p = [f32::from(event.position.x), f32::from(event.position.y)];
+        let p = [coord(event.position.x), coord(event.position.y)];
         let board = self.library.board();
         let camera = board.camera;
         if self.space || self.hand || event.button != MouseButton::Left {
@@ -486,7 +644,7 @@ impl Magpie {
             self.finish_gesture(cx);
             return;
         }
-        let p = [f32::from(event.position.x), f32::from(event.position.y)];
+        let p = [coord(event.position.x), coord(event.position.y)];
         let board = self.library.board_mut();
         match self.gesture.as_mut().unwrap() {
             Gesture::Pan { start, camera } => {
@@ -545,30 +703,58 @@ impl Magpie {
     }
 
     fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.rename.is_some() || self.gesture.is_some() {
+        if self.rename.is_some() || self.zoom_input.is_some() || self.gesture.is_some() {
             return;
         }
-        let delta = event.delta.pixel_delta(px(28.0));
-        let camera = &mut self.library.board_mut().camera;
-        if event.modifiers.control
-            || event.modifiers.platform
-            || !event.delta.precise() && !event.modifiers.shift
-        {
-            camera.zoom_at(
-                [f32::from(event.position.x), f32::from(event.position.y)],
-                camera.zoom * (f32::from(delta.y) * 0.003).exp(),
-            );
-        } else if event.modifiers.shift && !event.delta.precise() {
-            camera.x += f32::from(delta.y);
+        let delta = event.delta.pixel_delta(pixels(40.0));
+        if event.modifiers.control || event.modifiers.platform {
+            let anchor = [coord(event.position.x), coord(event.position.y)];
+            // High-resolution trackpad input follows the fingers directly. Wheel
+            // ticks ease towards a target, accumulating even between frames.
+            let smooth = !event.delta.precise();
+            let zoom = if smooth {
+                self.target_zoom()
+            } else {
+                self.library.board().camera.zoom
+            };
+            let distance = if event.modifiers.shift && delta.y == pixels(0.0) {
+                coord(delta.x)
+            } else {
+                coord(delta.y)
+            };
+            let sensitivity = if smooth { 0.0015 } else { 0.004 };
+            let factor = (distance.clamp(-500.0, 500.0) * sensitivity).exp();
+            self.zoom_at(anchor, zoom * factor, smooth, cx);
         } else {
-            camera.x += f32::from(delta.x);
-            camera.y += f32::from(delta.y);
+            self.motion = None;
+            let camera = &mut self.library.board_mut().camera;
+            if event.modifiers.shift && !event.delta.precise() {
+                // X11 already translates Shift+wheel into horizontal deltas.
+                camera.x += if delta.y == pixels(0.0) {
+                    coord(delta.x)
+                } else {
+                    coord(delta.y)
+                };
+            } else {
+                camera.x += coord(delta.x);
+                camera.y += coord(delta.y);
+            }
+            self.save(cx);
         }
-        self.save(cx);
+        cx.stop_propagation();
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
+        if self.zoom_input.is_some() {
+            match key {
+                "enter" => self.apply_zoom(window, cx),
+                "escape" => self.close_zoom(window, cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.rename.is_some() {
             match key {
                 "enter" => self.finish_rename(window, cx),
@@ -585,6 +771,9 @@ impl Magpie {
         let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         if command {
             match key {
+                "=" | "+" => self.zoom_step(true, cx),
+                "-" | "_" => self.zoom_step(false, cx),
+                "0" => self.zoom_at(self.center(), 1.0, true, cx),
                 "n" => self.new_board(window, cx),
                 "o" | "i" => self.choose_images(cx),
                 "v" => self.paste(cx),
@@ -595,6 +784,7 @@ impl Magpie {
                 "d" => self.duplicate(cx),
                 "z" | "y" => {
                     self.finish_gesture(cx);
+                    self.motion = None;
                     if event.keystroke.modifiers.shift || key == "y" {
                         self.history.redo(&mut self.library);
                     } else {
@@ -625,16 +815,15 @@ impl Magpie {
                     self.hand = false;
                     cx.notify();
                 }
-                "f" | "1" => self.fit(cx),
-                "0" => {
-                    let zoom = self.library.board().camera.zoom;
-                    self.zoom(1.0 / zoom, cx);
-                }
-                "=" | "+" => self.zoom(1.2, cx),
-                "-" => self.zoom(1.0 / 1.2, cx),
+                "f" | "1" | "!" => self.fit(false, cx),
+                "2" | "@" => self.fit(true, cx),
+                "0" | ")" => self.zoom_at(self.center(), 1.0, true, cx),
+                "=" | "+" => self.zoom_step(true, cx),
+                "-" | "_" => self.zoom_step(false, cx),
                 "backspace" | "delete" => self.delete_selection(cx),
                 "f2" => self.rename_board(window, cx),
                 "escape" => {
+                    self.motion = None;
                     if let Some(before) = self.before_gesture.take() {
                         self.library = before;
                     }
@@ -658,13 +847,13 @@ impl Magpie {
     fn button(id: &'static str, label: impl Into<SharedString>) -> Stateful<Div> {
         div()
             .id(id)
-            .h(px(34.0))
-            .px(px(12.0))
+            .h(pixels(34.0))
+            .px(pixels(12.0))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(7.0))
-            .text_size(px(12.0))
+            .rounded(pixels(7.0))
+            .text_size(pixels(12.0))
             .text_color(rgb(TEXT))
             .cursor_pointer()
             .hover(move |s| {
@@ -679,19 +868,20 @@ impl Magpie {
 
     fn panel() -> Div {
         div()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .bg(rgb(PANEL))
             .border_1()
             .border_color(rgb(BORDER))
-            .rounded(px(12.0))
+            .rounded(pixels(12.0))
             .shadow_lg()
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .absolute()
-            .top(px(22.0))
-            .left(px(24.0))
-            .right(px(24.0))
+            .top(pixels(22.0))
+            .left(pixels(24.0))
+            .right(pixels(24.0))
             .flex()
             .items_center()
             .justify_between()
@@ -699,54 +889,60 @@ impl Magpie {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(18.0))
+                    .gap(pixels(18.0))
                     .child(
                         div()
-                            .w(px(88.0))
+                            .w(pixels(88.0))
                             .whitespace_nowrap()
                             .flex_shrink_0()
-                            .text_size(px(24.0))
+                            .text_size(pixels(24.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(TEXT))
                             .child("magpie"),
                     )
-                    .child(div().w(px(1.0)).h(px(20.0)).bg(rgb(BORDER)))
+                    .child(div().w(pixels(1.0)).h(pixels(20.0)).bg(rgb(BORDER)))
                     .child(
                         Self::panel()
                             .id("board-switcher")
-                            .rounded(px(8.0))
+                            .rounded(pixels(8.0))
                             .shadow_none()
                             .flex()
                             .items_center()
-                            .px(px(4.0))
+                            .px(pixels(4.0))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 Self::button(
                                     "boards",
                                     format!("{}   ⌄", self.library.board().name),
                                 )
-                                .max_w(px(280.0))
+                                .max_w(pixels(280.0))
                                 .overflow_hidden()
                                 .on_click(cx.listener(
-                                    |this, _, _, cx| {
+                                    |this, _, window, cx| {
+                                        this.zoom_input = None;
+                                        this.focus.focus(window);
                                         this.boards_open = !this.boards_open;
                                         this.help_open = false;
                                         cx.notify();
                                     },
                                 )),
                             )
-                            .child(div().h(px(16.0)).w(px(1.0)).bg(rgb(BORDER)))
-                            .child(Self::button("new-board", "+").text_size(px(20.0)).on_click(
-                                cx.listener(|this, _, window, cx| this.new_board(window, cx)),
-                            )),
+                            .child(div().h(pixels(16.0)).w(pixels(1.0)).bg(rgb(BORDER)))
+                            .child(
+                                Self::button("new-board", "+")
+                                    .text_size(pixels(20.0))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_board(window, cx)
+                                    })),
+                            ),
                     ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(14.0))
-                    .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
+                    .gap(pixels(14.0))
+                    .child(div().text_size(pixels(11.0)).text_color(rgb(MUTED)).child(
                         if self.importing {
                             "Adding images…"
                         } else if self.dirty {
@@ -757,8 +953,8 @@ impl Magpie {
                     ))
                     .child(
                         Self::button("add-images", "+  Add images")
-                            .h(px(38.0))
-                            .px(px(16.0))
+                            .h(pixels(38.0))
+                            .px(pixels(16.0))
                             .bg(rgb(ACCENT))
                             .text_color(rgb(0x20271e))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -771,37 +967,37 @@ impl Magpie {
         Self::panel()
             .id("board-menu")
             .absolute()
-            .left(px(149.0))
-            .top(px(72.0))
-            .w(px(286.0))
-            .p(px(8.0))
+            .left(pixels(149.0))
+            .top(pixels(72.0))
+            .w(pixels(286.0))
+            .p(pixels(8.0))
             .flex()
             .flex_col()
-            .gap(px(3.0))
+            .gap(pixels(3.0))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .px(px(10.0))
-                    .py(px(8.0))
-                    .text_size(px(10.0))
+                    .px(pixels(10.0))
+                    .py(pixels(8.0))
+                    .text_size(pixels(10.0))
                     .text_color(rgb(MUTED))
                     .child("YOUR BOARDS"),
             )
             .child(
                 div()
                     .id("board-list")
-                    .max_h(px(300.0))
+                    .max_h(pixels(300.0))
                     .overflow_y_scroll()
                     .children(self.library.boards.iter().map(|board| {
                         let id = board.id;
                         div()
                             .id(SharedString::from(id.to_string()))
-                            .h(px(48.0))
-                            .px(px(10.0))
+                            .h(pixels(48.0))
+                            .px(pixels(10.0))
                             .flex()
                             .items_center()
                             .justify_between()
-                            .rounded(px(7.0))
+                            .rounded(pixels(7.0))
                             .cursor_pointer()
                             .when(id == self.library.active, |s| s.bg(rgb(0x30352e)))
                             .hover(|s| s.bg(rgb(0x343739)))
@@ -809,12 +1005,12 @@ impl Magpie {
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(3.0))
+                                    .gap(pixels(3.0))
                                     .overflow_hidden()
-                                    .child(div().text_size(px(12.0)).child(board.name.clone()))
+                                    .child(div().text_size(pixels(12.0)).child(board.name.clone()))
                                     .child(
                                         div()
-                                            .text_size(px(10.0))
+                                            .text_size(pixels(10.0))
                                             .text_color(rgb(MUTED))
                                             .child(format!("{} images", board.images.len())),
                                     ),
@@ -827,7 +1023,7 @@ impl Magpie {
                             }))
                     })),
             )
-            .child(div().h(px(1.0)).my(px(5.0)).bg(rgb(BORDER)))
+            .child(div().h(pixels(1.0)).my(pixels(5.0)).bg(rgb(BORDER)))
             .child(
                 Self::button("menu-new", "+  New board                         ⌘/Ctrl N")
                     .justify_start()
@@ -844,6 +1040,7 @@ impl Magpie {
                     .text_color(rgb(0xbc9691))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.checkpoint();
+                        this.motion = None;
                         this.library.delete_active();
                         this.selected.clear();
                         this.boards_open = false;
@@ -856,7 +1053,7 @@ impl Magpie {
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .absolute()
-            .bottom(px(24.0))
+            .bottom(pixels(24.0))
             .left_0()
             .right_0()
             .flex()
@@ -866,12 +1063,12 @@ impl Magpie {
                     .id("toolbar")
                     .flex()
                     .items_center()
-                    .p(px(5.0))
-                    .gap(px(3.0))
+                    .p(pixels(5.0))
+                    .gap(pixels(3.0))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         Self::button("select-tool", "↖")
-                            .text_size(px(18.0))
+                            .text_size(pixels(18.0))
                             .when(!self.hand, |s| s.bg(rgb(0x363b32)).text_color(rgb(ACCENT)))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.hand = false;
@@ -886,37 +1083,175 @@ impl Magpie {
                                 cx.notify();
                             })),
                     )
-                    .child(div().w(px(1.0)).h(px(20.0)).mx(px(4.0)).bg(rgb(BORDER)))
+                    .child(
+                        div()
+                            .w(pixels(1.0))
+                            .h(pixels(20.0))
+                            .mx(pixels(4.0))
+                            .bg(rgb(BORDER)),
+                    )
                     .child(
                         Self::button("zoom-out", "−")
-                            .text_size(px(18.0))
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom(1.0 / 1.2, cx))),
+                            .text_size(pixels(18.0))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.zoom_step(false, cx);
+                                this.close_zoom(window, cx);
+                            })),
                     )
                     .child(
                         Self::button(
-                            "zoom-reset",
-                            format!(
-                                "{}%",
-                                (self.library.board().camera.zoom * 100.0).round() as i32
-                            ),
+                            "zoom-menu",
+                            format!("{}  ⌄", format_zoom(self.library.board().camera.zoom)),
                         )
-                        .w(px(58.0))
-                        .px_0()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let zoom = this.library.board().camera.zoom;
-                            this.zoom(1.0 / zoom, cx);
-                        })),
+                        .min_w(pixels(82.0))
+                        .px(pixels(8.0))
+                        .when(self.zoom_input.is_some(), |s| {
+                            s.bg(rgb(0x363b32)).text_color(rgb(ACCENT))
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_zoom(window, cx))),
                     )
                     .child(
                         Self::button("zoom-in", "+")
-                            .text_size(px(18.0))
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom(1.2, cx))),
+                            .text_size(pixels(18.0))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.zoom_step(true, cx);
+                                this.close_zoom(window, cx);
+                            })),
                     )
-                    .child(div().w(px(1.0)).h(px(20.0)).mx(px(4.0)).bg(rgb(BORDER)))
                     .child(
-                        Self::button("fit", "Fit")
-                            .on_click(cx.listener(|this, _, _, cx| this.fit(cx))),
-                    ),
+                        div()
+                            .w(pixels(1.0))
+                            .h(pixels(20.0))
+                            .mx(pixels(4.0))
+                            .bg(rgb(BORDER)),
+                    )
+                    .child(Self::button("fit", "Fit").on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.fit(false, cx);
+                            this.close_zoom(window, cx);
+                        },
+                    ))),
+            )
+    }
+
+    fn zoom_menu(&self, input: Entity<TextInput>, cx: &mut Context<Self>) -> impl IntoElement {
+        let row = |id, label, shortcut: &'static str| {
+            Self::button(id, label).w_full().justify_between().child(
+                div()
+                    .text_size(pixels(11.0))
+                    .text_color(rgb(MUTED))
+                    .child(shortcut),
+            )
+        };
+        div()
+            .absolute()
+            .bottom(pixels(80.0))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                Self::panel()
+                    .w(pixels(286.0))
+                    .p(pixels(8.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .px(pixels(8.0))
+                            .pt(pixels(6.0))
+                            .pb(pixels(10.0))
+                            .child(
+                                div()
+                                    .text_size(pixels(11.0))
+                                    .text_color(rgb(MUTED))
+                                    .mb(pixels(8.0))
+                                    .child("Zoom to"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(pixels(6.0))
+                                    .child(div().flex_1().min_w_0().child(input))
+                                    .child(
+                                        Self::button("apply-zoom", "↵")
+                                            .bg(rgb(0x363b32))
+                                            .text_color(rgb(ACCENT))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.apply_zoom(window, cx)
+                                            })),
+                                    ),
+                            )
+                            .when(self.zoom_error, |s| {
+                                s.child(
+                                    div()
+                                        .mt(pixels(6.0))
+                                        .text_size(pixels(11.0))
+                                        .text_color(rgb(0xe6afa4))
+                                        .child("Enter a percentage from 1e-7 to 1e11."),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(pixels(4.0))
+                            .px(pixels(4.0))
+                            .pb(pixels(8.0))
+                            .children(
+                                [
+                                    ("preset-25", "25%", 0.25),
+                                    ("preset-50", "50%", 0.5),
+                                    ("preset-100", "100%", 1.0),
+                                    ("preset-200", "200%", 2.0),
+                                ]
+                                .map(|(id, label, zoom)| {
+                                    Self::button(id, label)
+                                        .flex_1()
+                                        .px_0()
+                                        .bg(rgb(0x292c2e))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.zoom_at(this.center(), zoom, true, cx);
+                                            this.close_zoom(window, cx);
+                                        }))
+                                }),
+                            ),
+                    )
+                    .child(div().h(pixels(1.0)).bg(rgb(BORDER)).my(pixels(4.0)))
+                    .child(row("menu-zoom-in", "Zoom in", "+").on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.zoom_step(true, cx);
+                            this.close_zoom(window, cx);
+                        },
+                    )))
+                    .child(row("menu-zoom-out", "Zoom out", "−").on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.zoom_step(false, cx);
+                            this.close_zoom(window, cx);
+                        },
+                    )))
+                    .child(
+                        row("menu-fit-all", "Fit all images", "Shift 1").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.fit(false, cx);
+                                this.close_zoom(window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        row("menu-fit-selection", "Fit selection", "Shift 2")
+                            .when(self.selected.is_empty(), |s| s.text_color(rgb(MUTED)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.fit(true, cx);
+                                this.close_zoom(window, cx);
+                            })),
+                    )
+                    .child(row("menu-actual-size", "Zoom to 100%", "Shift 0").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.zoom_at(this.center(), 1.0, true, cx);
+                            this.close_zoom(window, cx);
+                        }),
+                    )),
             )
     }
 
@@ -928,59 +1263,59 @@ impl Magpie {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(18.0))
+            .gap(pixels(18.0))
             .child(
                 div()
                     .relative()
-                    .w(px(108.0))
-                    .h(px(80.0))
-                    .mb(px(12.0))
+                    .w(pixels(108.0))
+                    .h(pixels(80.0))
+                    .mb(pixels(12.0))
                     .child(
                         div()
                             .absolute()
-                            .left(px(3.0))
-                            .top(px(13.0))
-                            .w(px(52.0))
-                            .h(px(60.0))
+                            .left(pixels(3.0))
+                            .top(pixels(13.0))
+                            .w(pixels(52.0))
+                            .h(pixels(60.0))
                             .bg(rgb(0x212528))
                             .border_1()
                             .border_color(rgb(0x3a4143))
-                            .rounded(px(6.0)),
+                            .rounded(pixels(6.0)),
                     )
                     .child(
                         div()
                             .absolute()
-                            .left(px(46.0))
+                            .left(pixels(46.0))
                             .top_0()
-                            .w(px(58.0))
-                            .h(px(72.0))
+                            .w(pixels(58.0))
+                            .h(pixels(72.0))
                             .bg(rgb(0x2d332c))
                             .border_1()
                             .border_color(rgb(0x555f50))
-                            .rounded(px(6.0))
+                            .rounded(pixels(6.0))
                             .flex()
                             .items_center()
                             .justify_center()
                             .text_color(rgb(ACCENT))
-                            .text_size(px(26.0))
+                            .text_size(pixels(26.0))
                             .child("+"),
                     ),
             )
             .child(
                 div()
-                    .text_size(px(25.0))
+                    .text_size(pixels(25.0))
                     .font_weight(FontWeight::MEDIUM)
                     .child("A little space for your ideas."),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(pixels(13.0))
                     .text_color(rgb(MUTED))
                     .child("Drop images anywhere. Make room for what inspires you."),
             )
             .child(
                 Self::button("empty-add", "Choose images   ↗")
-                    .mt(px(5.0))
+                    .mt(pixels(5.0))
                     .border_1()
                     .border_color(rgb(0x454b42))
                     .text_color(rgb(ACCENT))
@@ -989,7 +1324,7 @@ impl Magpie {
             )
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(pixels(10.0))
                     .text_color(rgb(0x666d6b))
                     .child("PNG, JPG, WEBP, GIF, BMP, TIFF  ·  or paste an image"),
             )
@@ -1006,25 +1341,25 @@ impl Magpie {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 Self::panel()
-                    .w(px(380.0))
-                    .p(px(24.0))
+                    .w(pixels(380.0))
+                    .p(pixels(24.0))
                     .flex()
                     .flex_col()
-                    .gap(px(18.0))
-                    .child(div().text_size(px(18.0)).child("Name your board"))
+                    .gap(pixels(18.0))
+                    .child(div().text_size(pixels(18.0)).child("Name your board"))
                     .child(
                         div()
                             .border_1()
                             .border_color(rgb(0x65715c))
-                            .rounded(px(6.0))
-                            .p(px(5.0))
+                            .rounded(pixels(6.0))
+                            .p(pixels(5.0))
                             .child(input),
                     )
                     .child(
                         div()
                             .flex()
                             .justify_end()
-                            .gap(px(8.0))
+                            .gap(pixels(8.0))
                             .child(
                                 Self::button("cancel-rename", "Cancel").on_click(cx.listener(
                                     |this, _, window, cx| {
@@ -1052,11 +1387,14 @@ impl Magpie {
             ("Add images", "Ctrl / ⌘ O"),
             ("Paste image", "Ctrl / ⌘ V"),
             ("Pan canvas", "Drag empty space / Space + drag"),
-            ("Zoom", "Wheel / Ctrl + two-finger scroll"),
+            ("Zoom at pointer", "Ctrl / ⌘ + scroll"),
+            ("Zoom in / out", "+ / −"),
+            ("Trackpad", "Scroll to pan · pinch to zoom on Mac"),
             ("Select several", "Shift + click / Shift + drag"),
             ("Resize image", "Drag the bottom-right handle"),
-            ("Fit everything", "F"),
-            ("Actual size", "0"),
+            ("Fit everything", "Shift 1 / F"),
+            ("Fit selection", "Shift 2"),
+            ("Actual size", "Shift 0 / 0"),
             ("Duplicate", "Ctrl / ⌘ D"),
             ("Delete selection", "Delete / Backspace"),
             ("Undo / redo", "Ctrl / ⌘ Z / Shift Z"),
@@ -1064,25 +1402,25 @@ impl Magpie {
         ];
         Self::panel()
             .absolute()
-            .right(px(24.0))
-            .bottom(px(76.0))
-            .w(px(410.0))
-            .p(px(22.0))
+            .right(pixels(24.0))
+            .bottom(pixels(76.0))
+            .w(pixels(410.0))
+            .p(pixels(22.0))
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(pixels(14.0))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .text_size(px(16.0))
-                    .mb(px(5.0))
+                    .text_size(pixels(16.0))
+                    .mb(pixels(5.0))
                     .child("Make yourself at home"),
             )
             .children(shortcuts.map(|(name, key)| {
                 div()
                     .flex()
                     .justify_between()
-                    .text_size(px(11.0))
+                    .text_size(pixels(11.0))
                     .child(div().text_color(rgb(MUTED)).child(name))
                     .child(key)
             }))
@@ -1092,9 +1430,10 @@ impl Magpie {
 impl Render for Magpie {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.viewport = [
-            f32::from(window.viewport_size().width),
-            f32::from(window.viewport_size().height),
+            coord(window.viewport_size().width),
+            coord(window.viewport_size().height),
         ];
+        self.animate_frame(window, cx);
         let board = self.library.board();
         let camera = board.camera;
         let viewport = self.viewport;
@@ -1145,22 +1484,22 @@ impl Render for Magpie {
             .on_scroll_wheel(cx.listener(Self::scroll))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 let p = window.mouse_position();
-                this.import_paths(paths.paths().to_vec(), [f32::from(p.x), f32::from(p.y)], cx);
+                this.import_paths(paths.paths().to_vec(), [coord(p.x), coord(p.y)], cx);
             }))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(0x20271f)))
             .child(
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, _| {
-                        let spacing = if camera.zoom < 0.4 { 160.0 } else { 48.0 } * camera.zoom;
+                        let spacing = grid_spacing(camera.zoom);
                         let mut x = camera.x.rem_euclid(spacing);
                         while x < viewport[0] {
                             let mut y = camera.y.rem_euclid(spacing);
                             while y < viewport[1] {
                                 window.paint_quad(fill(
                                     Bounds::new(
-                                        point(bounds.left() + px(x), bounds.top() + px(y)),
-                                        size(px(1.0), px(1.0)),
+                                        point(bounds.left() + pixels(x), bounds.top() + pixels(y)),
+                                        size(pixels(1.0), pixels(1.0)),
                                     ),
                                     rgb(0x303437),
                                 ));
@@ -1186,39 +1525,46 @@ impl Render for Magpie {
                 continue;
             }
             let selected = self.selected.contains(&item.id);
-            root = root.child(
-                div()
-                    .absolute()
-                    .left(px(p[0]))
-                    .top(px(p[1]))
-                    .w(px(w))
-                    .h(px(h))
-                    .bg(rgb(0x25282a))
-                    .shadow_lg()
-                    .child(
-                        img(self.storage.asset(&item.asset))
-                            .size_full()
-                            .object_fit(ObjectFit::Contain),
-                    ),
-            );
-            if selected {
+            if w.max(h) > 1_000_000.0 {
+                root = root.child(crate::canvas_image::magnified_image(
+                    item,
+                    camera,
+                    viewport,
+                    self.storage.asset(&item.asset),
+                    window,
+                    cx,
+                ));
+            } else {
                 root = root.child(
                     div()
                         .absolute()
-                        .left(px(p[0] - 3.0))
-                        .top(px(p[1] - 3.0))
-                        .w(px(w + 6.0))
-                        .h(px(h + 6.0))
-                        .border_1()
-                        .border_color(rgb(ACCENT)),
+                        .left(pixels(p[0]))
+                        .top(pixels(p[1]))
+                        .w(pixels(w))
+                        .h(pixels(h))
+                        .bg(rgb(0x25282a))
+                        .shadow_lg()
+                        .child(
+                            img(self.storage.asset(&item.asset))
+                                .size_full()
+                                .object_fit(ObjectFit::Contain),
+                        ),
                 );
-                if self.selected.len() == 1 {
+            }
+            if selected {
+                root = root.child(crate::canvas_image::selection_outline(p, [w, h], viewport));
+                if self.selected.len() == 1
+                    && p[0] + w >= -8.0
+                    && p[0] + w <= viewport[0] + 8.0
+                    && p[1] + h >= -8.0
+                    && p[1] + h <= viewport[1] + 8.0
+                {
                     root = root.child(
                         div()
                             .absolute()
-                            .left(px(p[0] + w - 4.0))
-                            .top(px(p[1] + h - 4.0))
-                            .size(px(8.0))
+                            .left(pixels(p[0] + w - 4.0))
+                            .top(pixels(p[1] + h - 4.0))
+                            .size(pixels(8.0))
                             .bg(rgb(ACCENT))
                             .border_1()
                             .border_color(rgb(BG))
@@ -1231,10 +1577,10 @@ impl Render for Magpie {
             root = root.child(
                 div()
                     .absolute()
-                    .left(px(start[0].min(end[0])))
-                    .top(px(start[1].min(end[1])))
-                    .w(px((end[0] - start[0]).abs()))
-                    .h(px((end[1] - start[1]).abs()))
+                    .left(pixels(start[0].min(end[0])))
+                    .top(pixels(start[1].min(end[1])))
+                    .w(pixels((end[0] - start[0]).abs()))
+                    .h(pixels((end[1] - start[1]).abs()))
                     .bg(rgba(0xc6d5b512))
                     .border_1()
                     .border_color(rgb(ACCENT)),
@@ -1249,9 +1595,9 @@ impl Render for Magpie {
             .child(
                 div()
                     .absolute()
-                    .left(px(24.0))
-                    .bottom(px(34.0))
-                    .text_size(px(11.0))
+                    .left(pixels(24.0))
+                    .bottom(pixels(34.0))
+                    .text_size(pixels(11.0))
                     .text_color(rgb(MUTED))
                     .child(if self.selected.is_empty() {
                         format!("{} images  ·  Infinite canvas", board.images.len())
@@ -1262,14 +1608,16 @@ impl Render for Magpie {
             .child(
                 Self::button("help", "?")
                     .absolute()
-                    .right(px(24.0))
-                    .bottom(px(26.0))
-                    .w(px(34.0))
+                    .right(pixels(24.0))
+                    .bottom(pixels(26.0))
+                    .w(pixels(34.0))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .text_color(rgb(MUTED))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.zoom_input = None;
+                        this.focus.focus(window);
                         this.help_open = !this.help_open;
                         this.boards_open = false;
                         cx.notify();
@@ -1281,21 +1629,24 @@ impl Render for Magpie {
         if self.help_open {
             root = root.child(self.help());
         }
+        if let Some(input) = &self.zoom_input {
+            root = root.child(self.zoom_menu(input.clone(), cx));
+        }
         if let Some(message) = &self.message {
             root = root.child(
                 div()
                     .absolute()
-                    .bottom(px(88.0))
+                    .bottom(pixels(88.0))
                     .left_0()
                     .right_0()
                     .flex()
                     .justify_center()
                     .child(
                         Self::panel()
-                            .px(px(18.0))
-                            .py(px(10.0))
-                            .max_w(px(700.0))
-                            .text_size(px(12.0))
+                            .px(pixels(18.0))
+                            .py(pixels(10.0))
+                            .max_w(pixels(700.0))
+                            .text_size(pixels(12.0))
                             .child(message.clone()),
                     ),
             );

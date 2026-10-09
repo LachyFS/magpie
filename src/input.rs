@@ -601,11 +601,15 @@ impl Focusable for TextInput {
 
 impl TextInput {
     pub fn new(value: String, cx: &mut Context<Self>) -> Self {
+        Self::with_placeholder(value, "Board name", cx)
+    }
+
+    pub fn with_placeholder(value: String, placeholder: &str, cx: &mut Context<Self>) -> Self {
         let len = value.len();
         Self {
             focus_handle: cx.focus_handle(),
             content: value.into(),
-            placeholder: "Board name".into(),
+            placeholder: placeholder.to_owned().into(),
             selected_range: 0..len,
             selection_reversed: false,
             marked_range: None,

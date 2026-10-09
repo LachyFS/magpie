@@ -27,6 +27,10 @@ Every release includes `SHA256SUMS.txt`. Verify a download with `sha256sum --che
 
 ## Screenshots
 
+Zoom smoothly around the pointer, enter an exact percentage, or jump straight to your selection:
+
+![Magpie's zoom menu with an editable percentage, presets, and fit controls](docs/screenshots/zoom.png)
+
 Switch boards or start a new collection in one click:
 
 ![Magpie's board switcher with three local boards and a new-board action](docs/screenshots/boards.png)
@@ -66,9 +70,11 @@ For an optimized local build, use `cargo build --release --locked` and run `targ
 
 - Drop one or several image files anywhere, choose **Add images**, or paste a copied image. Imports preserve originals and create bounded previews in the background.
 - Drag an image to move it. Select one image and drag its bottom-right handle to resize while preserving its aspect ratio.
-- Drag empty space to pan. Hold Space to pan from anywhere. Two-finger scrolling also pans; a mouse wheel zooms around the pointer. Hold Ctrl/Cmd while scrolling a trackpad to zoom.
+- Drag empty space to pan. Hold Space to pan from anywhere. Mouse-wheel and two-finger scrolling also pan; Shift+wheel pans horizontally. Hold Ctrl/Cmd while scrolling to zoom around the pointer. On macOS, pinch the trackpad to zoom.
 - Shift-click images to select several, or Shift-drag empty space to draw a selection rectangle.
 - Click **+** beside the board title to create a board immediately. Click the title to switch, rename, or delete boards. Deleted boards and images can be restored with Undo during the same session.
+- Click the zoom percentage to enter any scale or pick a preset. The **− / +** buttons ease between useful steps; **Fit** brings all images into view. Fit selection keeps your selection intact.
+- Zoom keeps going far beyond ordinary presets, from **0.0000001% to 100,000,000,000%**. These are numerical safety bounds, not literal infinite precision. The grid adapts at every scale, and camera/image coordinates use double precision.
 - The **?** button shows keyboard shortcuts.
 
 | Action | Shortcut |
@@ -80,8 +86,10 @@ For an optimized local build, use `cargo build --release --locked` and run `targ
 | Duplicate selection | Ctrl/Cmd+D |
 | Delete selection | Delete / Backspace |
 | Undo / redo | Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z |
-| Fit all images | F |
-| Reset zoom to 100% | 0 |
+| Zoom in / out | + / −, or Ctrl/Cmd + / − |
+| Fit all images | Shift+1 / F |
+| Fit selection | Shift+2 |
+| Reset zoom to 100% | Shift+0 / 0 |
 | Select / pan tool | V / H |
 | Rename board | F2 |
 | Deselect / close overlay / cancel move | Escape |
@@ -104,6 +112,6 @@ cargo clippy --all-targets --locked -- -D warnings
 python3 scripts/smoke_x11.py
 ```
 
-The eight library tests cover canvas geometry, undo history, file ownership, persistence, corruption handling, and concurrent access. Build the desktop binary before running the Linux smoke test (`cargo build --locked`). It drives a real GPUI window in an isolated X server: board creation and renaming, OS file drops, clipboard images, movement, resizing, pan/zoom, duplicate/delete/undo, and reopening the saved library. Install its additional dependencies on Ubuntu/Debian with `sudo apt install xvfb xdotool python3-xlib python3-pil mesa-vulkan-drivers`, then run it using `/usr/bin/python3 scripts/smoke_x11.py`.
+The library tests cover camera geometry, animated zoom anchoring, percentage parsing, extreme scales, adaptive grid density, undo history, file ownership, persistence, corruption handling, and concurrent access. Build the desktop binary before running the Linux smoke test (`cargo build --locked`). It drives a real GPUI window in an isolated X server: board creation and renaming, OS file drops, clipboard images, movement, resizing, pan, pointer-anchored zoom, custom percentages, extreme zoom rendering, fit selection, keyboard shortcuts, duplicate/delete/undo, and reopening the saved library. Install its additional dependencies on Ubuntu/Debian with `sudo apt install xvfb xdotool python3-xlib python3-pil mesa-vulkan-drivers`, then run it using `/usr/bin/python3 scripts/smoke_x11.py`.
 
-`src/model.rs` owns board state, camera geometry, and undo/redo. `src/storage.rs` owns validation, image import, and atomic persistence. `src/app.rs` implements the GPUI interface and background import tasks. `src/input.rs` provides a native text field with clipboard, selection, and IME support, adapted from GPUI's Apache-licensed input example.
+`src/model.rs` owns board state, camera geometry, and undo/redo. `src/navigation.rs` owns smooth camera transitions, zoom steps, and scale formatting. `src/macos_gestures.rs` bridges native AppKit pinch gestures. `src/canvas_image.rs` keeps image and selection rendering in viewport coordinates at extreme magnification. `src/storage.rs` owns validation, image import, and atomic persistence. `src/app.rs` implements the GPUI interface and background import tasks. `src/input.rs` provides a native text field with clipboard, selection, and IME support, adapted from GPUI's Apache-licensed input example.
