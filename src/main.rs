@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app;
 mod input;
 
@@ -13,12 +18,18 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("--help" | "-h") => {
-            println!("Magpie {}\n\nUsage: magpie [IMAGE ...]\n\n  --version, -V    Print the version\n  --help, -h       Show this help\n\nSet MAGPIE_DATA_DIR to use a separate local library.", env!("CARGO_PKG_VERSION"));
+            println!(
+                "Magpie {}\n\nUsage: magpie [IMAGE ...]\n\n  --version, -V    Print the version\n  --help, -h       Show this help\n\nSet MAGPIE_DATA_DIR to use a separate local library.",
+                env!("CARGO_PKG_VERSION")
+            );
             return Ok(());
         }
         _ => {}
     }
-    let paths = arguments.into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    let paths = arguments
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
     let storage = Storage::open(None)?;
     let library = storage.load()?;
     Application::new().run(move |cx: &mut App| {
@@ -56,4 +67,3 @@ fn main() -> anyhow::Result<()> {
     });
     Ok(())
 }
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
