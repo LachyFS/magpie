@@ -33,7 +33,7 @@ Zoom smoothly around the pointer, enter an exact percentage, or jump straight to
 
 Switch boards or start a new collection in one click:
 
-![Magpie's board switcher with three local boards and a new-board action](docs/screenshots/boards.png)
+![Magpie's collapsible sidebar with three local boards and a new-board action](docs/screenshots/boards.png)
 
 <details>
 <summary>A fresh canvas</summary>
@@ -68,17 +68,19 @@ For an optimized local build, use `cargo build --release --locked` and run `targ
 
 ## Using the canvas
 
-- Drop one or several image files anywhere, choose **Add images**, or paste a copied image. Imports preserve originals and create bounded previews in the background.
+- Drop one or several image files anywhere, press **Ctrl/Cmd+O**, or paste a copied image. Imports preserve originals and create bounded previews in the background.
 - Drag an image to move it. Select one image and drag its bottom-right handle to resize while preserving its aspect ratio.
 - Drag empty space to pan. Hold Space to pan from anywhere. Mouse-wheel and two-finger scrolling also pan; Shift+wheel pans horizontally. Hold Ctrl/Cmd while scrolling to zoom around the pointer. On macOS, pinch the trackpad to zoom.
 - Shift-click images to select several, or Shift-drag empty space to draw a selection rectangle.
-- Click **+** beside the board title to create a board immediately. Click the title to switch, rename, or delete boards. Deleted boards and images can be restored with Undo during the same session.
+- Use **+ New board** in the left sidebar to start a collection, then click a board to switch. Rename and delete actions sit at the bottom of the sidebar. Collapse it with **‹**, and reopen it with **☰** or **Ctrl/Cmd+B**. Deleted boards and images can be restored with Undo during the same session.
+- A small spinner appears during imports and saving; the canvas stays free of status text when idle.
 - Click the zoom percentage to enter any scale or pick a preset. The **− / +** buttons ease between useful steps; **Fit** brings all images into view. Fit selection keeps your selection intact.
 - Zoom keeps going far beyond ordinary presets, from **0.0000001% to 100,000,000,000%**. These are numerical safety bounds, not literal infinite precision. The grid adapts at every scale, and camera/image coordinates use double precision.
 - The **?** button shows keyboard shortcuts.
 
 | Action | Shortcut |
 | --- | --- |
+| Toggle boards sidebar | Ctrl/Cmd+B |
 | New board | Ctrl/Cmd+N |
 | Import images | Ctrl/Cmd+O |
 | Paste image | Ctrl/Cmd+V |

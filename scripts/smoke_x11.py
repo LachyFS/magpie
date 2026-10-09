@@ -135,12 +135,16 @@ def run():
             x("type", "--clearmodifiers", "Smoke board")
             x("key", "Return")
             assert board()["name"] == "Smoke board", "Rename"
-            # The board title's width varies with the OS's fallback font.
-            # Locate the panel border and click its trailing '+' button.
-            header = ImageGrab.grab(xdisplay=env["DISPLAY"])
-            borders = [p for p in range(200, 600) if header.getpixel((p, 42))[:3] == (52, 55, 57)]
-            assert borders, "Board switcher is visible"
-            x("mousemove", max(borders) - 20, 42, "click", 1)
+            # Board navigation is docked; switching boards leaves it open.
+            x("mousemove", 85, 180, "click", 1)
+            assert board()["name"] == "Untitled board", "Sidebar switches boards"
+            x("mousemove", 85, 226, "click", 1)
+            assert board()["name"] == "Smoke board", "Sidebar stays open after switching"
+            x("mousemove", 205, 40, "click", 1)
+            assert ImageGrab.grab(xdisplay=env["DISPLAY"]).getpixel((50, 400))[:3] == (23, 25, 27), "Sidebar collapses"
+            x("mousemove", 40, 40, "click", 1)
+            assert ImageGrab.grab(xdisplay=env["DISPLAY"]).getpixel((50, 400))[:3] == (29, 31, 33), "Sidebar reopens"
+            x("mousemove", 100, 98, "click", 1)
             assert len(state()["boards"]) == 3, "New board button"
             x("key", "ctrl+z")
             assert board()["name"] == "Smoke board", "Undo board creation"
@@ -257,10 +261,10 @@ def run():
             x("mousemove", *center, "click", 1)
             x("key", "shift+2")
             selected = board()
-            assert max(abs(a - b) for a, b in zip(screen(selected, selected["images"][0]), [640, 410])) < 2, "Fit selection centers the selected image"
+            assert max(abs(a - b) for a, b in zip(screen(selected, selected["images"][0]), [760, 410])) < 2, "Fit selection centers the selected image"
 
             def enter_zoom(value):
-                x("mousemove", 656, 773, "click", 1)
+                x("mousemove", 776, 773, "click", 1)
                 time.sleep(0.2)
                 x("key", "ctrl+a")
                 x("type", "--clearmodifiers", value)
@@ -276,7 +280,7 @@ def run():
             for value, expected in [("1000000%", 10000), ("1e11%", 1e9)]:
                 assert enter_zoom(value)["zoom"] == expected, "Zoom far beyond the old upper cap"
                 # The selected solid-color image must still cover the viewport.
-                pixel = ImageGrab.grab(xdisplay=env["DISPLAY"]).getpixel((640, 410))[:3]
+                pixel = ImageGrab.grab(xdisplay=env["DISPLAY"]).getpixel((760, 410))[:3]
                 assert max(abs(a - b) for a, b in zip(pixel, (159, 174, 133))) <= 2, ("Image renders at extreme zoom", value, pixel)
             assert abs(enter_zoom("0.00001%")["zoom"] - 1e-7) < 1e-16, "Zoom far beyond the old lower cap"
             x("key", "shift+1")
@@ -325,7 +329,7 @@ def run():
             assert reopened == saved, ("Reopen restores boards and camera positions", saved, reopened)
             x("key", "ctrl+q")
             app.wait(timeout=5)
-            print("PASS: native board creation/rename, OS file drop, owned imports, move, resize, pan, anchored zoom, zoom menu, extreme scales, fit selection, zoom shortcuts, duplicate, delete, undo/redo, clipboard paste, library locking, restart persistence")
+            print("PASS: native sidebar switching/collapse, board creation/rename, OS file drop, owned imports, move, resize, pan, anchored zoom, zoom menu, extreme scales, fit selection, zoom shortcuts, duplicate, delete, undo/redo, clipboard paste, library locking, restart persistence")
             log.close()
     finally:
         if app and app.poll() is None:

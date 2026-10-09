@@ -25,6 +25,7 @@ const BORDER: u32 = 0x343739;
 const TEXT: u32 = 0xe9e9e3;
 const MUTED: u32 = 0x909593;
 const ACCENT: u32 = 0xc6d5b5;
+const SIDEBAR_WIDTH: f64 = 240.0;
 
 enum Gesture {
     Pan {
@@ -66,7 +67,7 @@ pub struct Magpie {
     _pinch_monitor: Option<crate::macos_gestures::MagnifyMonitor>,
     importing: bool,
     save_task: Option<Task<()>>,
-    dirty: bool,
+    saving: bool,
     message: Option<String>,
     message_task: Option<Task<()>>,
     viewport: [f64; 2],
@@ -103,7 +104,7 @@ impl Magpie {
             before_gesture: None,
             space: false,
             hand: false,
-            boards_open: false,
+            boards_open: true,
             help_open: false,
             rename: None,
             zoom_input: None,
@@ -113,7 +114,7 @@ impl Magpie {
             _pinch_monitor: crate::macos_gestures::MagnifyMonitor::install(window, cx),
             importing: false,
             save_task: None,
-            dirty: false,
+            saving: false,
             message: None,
             message_task: None,
             viewport: [1280.0, 820.0],
@@ -147,15 +148,16 @@ impl Magpie {
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
-        self.dirty = true;
+        self.saving = true;
         self.save_task = Some(cx.spawn(async |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(350))
                 .await;
             let _ = this.update(cx, |this, cx| {
-                match this.storage.save(&this.library) {
-                    Ok(()) => this.dirty = false,
-                    Err(error) => this.toast(format!("Couldn't save: {error}"), cx),
+                let result = this.storage.save(&this.library);
+                this.saving = false;
+                if let Err(error) = result {
+                    this.toast(format!("Couldn't save: {error}"), cx);
                 }
                 cx.notify();
             });
@@ -174,7 +176,6 @@ impl Magpie {
         self.checkpoint();
         self.library.add_board();
         self.selected.clear();
-        self.boards_open = false;
         self.rename = None;
         self.focus.focus(window);
         self.save(cx);
@@ -186,14 +187,12 @@ impl Magpie {
         self.zoom_input = None;
         self.library.active = id;
         self.selected.clear();
-        self.boards_open = false;
         self.focus.focus(window);
         self.save(cx);
     }
 
     fn rename_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.zoom_input = None;
-        self.boards_open = false;
         let name = self.library.board().name.clone();
         let input = cx.new(|cx| TextInput::new(name, cx));
         input.focus_handle(cx).focus(window);
@@ -230,10 +229,7 @@ impl Magpie {
         cx.spawn(async move |this, cx| match receiver.await {
             Ok(Ok(Some(paths))) => {
                 let _ = this.update(cx, |this, cx| {
-                    let center = [
-                        this.viewport[0] / 2.0 - 180.0,
-                        this.viewport[1] / 2.0 - 130.0,
-                    ];
+                    let center = [this.center()[0] - 180.0, this.center()[1] - 130.0];
                     this.import_paths(paths, center, cx);
                 });
             }
@@ -366,10 +362,11 @@ impl Magpie {
         }
         self.importing = true;
         let board = self.library.active;
-        let world = self.library.board().camera.world([
-            self.viewport[0] / 2.0 - 180.0,
-            self.viewport[1] / 2.0 - 130.0,
-        ]);
+        let world = self
+            .library
+            .board()
+            .camera
+            .world([self.center()[0] - 180.0, self.center()[1] - 130.0]);
         let storage = self.storage.clone();
         let task = cx.background_executor().spawn(async move {
             let mut result = vec![];
@@ -429,8 +426,24 @@ impl Magpie {
         self.save(cx);
     }
 
+    fn canvas_left(&self) -> f64 {
+        if self.boards_open { SIDEBAR_WIDTH } else { 0.0 }
+    }
+
     fn center(&self) -> [f64; 2] {
-        [self.viewport[0] / 2.0, self.viewport[1] / 2.0]
+        [
+            (self.viewport[0] + self.canvas_left()) / 2.0,
+            self.viewport[1] / 2.0,
+        ]
+    }
+
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_gesture(cx);
+        self.motion = None;
+        self.zoom_input = None;
+        self.boards_open = !self.boards_open;
+        self.focus.focus(window);
+        cx.notify();
     }
 
     fn target_zoom(&self) -> f64 {
@@ -482,7 +495,11 @@ impl Magpie {
             return;
         }
         let mut camera = self.library.board().camera;
-        camera.fit(&images, self.viewport);
+        camera.fit(
+            &images,
+            [self.viewport[0] - self.canvas_left(), self.viewport[1]],
+        );
+        camera.x += self.canvas_left();
         self.animate_to(camera, self.center(), cx);
     }
 
@@ -526,7 +543,6 @@ impl Magpie {
             input.focus_handle(cx).focus(window);
             self.zoom_input = Some(input);
             self.zoom_error = false;
-            self.boards_open = false;
             self.help_open = false;
             cx.notify();
         }
@@ -556,7 +572,7 @@ impl Magpie {
         if self.rename.is_some()
             || self.zoom_input.is_some()
             || self.gesture.is_some()
-            || self.boards_open
+            || anchor[0] < self.canvas_left()
             || self.help_open
             || anchor[1] < 80.0
             || anchor[1] > self.viewport[1] - 80.0
@@ -575,7 +591,6 @@ impl Magpie {
         self.focus.focus(window);
         self.zoom_input = None;
         self.motion = None;
-        self.boards_open = false;
         self.help_open = false;
         let p = [coord(event.position.x), coord(event.position.y)];
         let board = self.library.board();
@@ -774,6 +789,7 @@ impl Magpie {
                 "=" | "+" => self.zoom_step(true, cx),
                 "-" | "_" => self.zoom_step(false, cx),
                 "0" => self.zoom_at(self.center(), 1.0, true, cx),
+                "b" => self.toggle_sidebar(window, cx),
                 "n" => self.new_board(window, cx),
                 "o" | "i" => self.choose_images(cx),
                 "v" => self.paste(cx),
@@ -829,7 +845,6 @@ impl Magpie {
                     }
                     self.gesture = None;
                     self.selected.clear();
-                    self.boards_open = false;
                     self.help_open = false;
                     self.space = false;
                     cx.notify();
@@ -857,7 +872,7 @@ impl Magpie {
             .text_color(rgb(TEXT))
             .cursor_pointer()
             .hover(move |s| {
-                s.bg(rgb(if matches!(id, "add-images" | "save-name") {
+                s.bg(rgb(if id == "save-name" {
                     0xd5e2c8
                 } else {
                     0x323537
@@ -880,8 +895,9 @@ impl Magpie {
         div()
             .absolute()
             .top(pixels(22.0))
-            .left(pixels(24.0))
+            .left(pixels(self.canvas_left() + 24.0))
             .right(pixels(24.0))
+            .h(pixels(36.0))
             .flex()
             .items_center()
             .justify_between()
@@ -889,164 +905,203 @@ impl Magpie {
                 div()
                     .flex()
                     .items_center()
-                    .gap(pixels(18.0))
+                    .gap(pixels(12.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .when(!self.boards_open, |header| {
+                        header.child(
+                            Self::button("show-sidebar", "☰")
+                                .w(pixels(32.0))
+                                .px_0()
+                                .text_color(rgb(MUTED))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_sidebar(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         div()
-                            .w(pixels(88.0))
-                            .whitespace_nowrap()
-                            .flex_shrink_0()
+                            .max_w(pixels(320.0))
+                            .text_ellipsis()
+                            .text_size(pixels(13.0))
+                            .text_color(rgb(MUTED))
+                            .child(self.library.board().name.clone()),
+                    ),
+            )
+            .when(self.saving || self.importing, |header| {
+                header.child(Self::saving_spinner())
+            })
+    }
+
+    fn saving_spinner() -> impl IntoElement {
+        div().size(pixels(16.0)).flex_shrink_0().with_animation(
+            "saving-spinner",
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |spinner, progress| {
+                spinner.child(
+                    canvas(
+                        move |_, _, _| progress,
+                        |bounds, progress, window, _| {
+                            let center = bounds.center();
+                            let angle = progress * std::f32::consts::TAU;
+                            let mut path = PathBuilder::stroke(px(1.5));
+                            for step in 0..=32 {
+                                let theta =
+                                    angle + step as f32 / 32.0 * std::f32::consts::TAU * 0.75;
+                                let point = point(
+                                    center.x + px(theta.cos() * 6.0),
+                                    center.y + px(theta.sin() * 6.0),
+                                );
+                                if step == 0 {
+                                    path.move_to(point);
+                                } else {
+                                    path.line_to(point);
+                                }
+                            }
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, rgb(MUTED));
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+            },
+        )
+    }
+
+    fn board_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("board-sidebar")
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(pixels(SIDEBAR_WIDTH))
+            .bg(rgb(0x1d1f21))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .flex()
+            .flex_col()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .h(pixels(80.0))
+                    .flex_shrink_0()
+                    .px(pixels(20.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
                             .text_size(pixels(24.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(TEXT))
                             .child("magpie"),
                     )
-                    .child(div().w(pixels(1.0)).h(pixels(20.0)).bg(rgb(BORDER)))
                     .child(
-                        Self::panel()
-                            .id("board-switcher")
-                            .rounded(pixels(8.0))
-                            .shadow_none()
-                            .flex()
-                            .items_center()
-                            .px(pixels(4.0))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(
-                                Self::button(
-                                    "boards",
-                                    format!("{}   ⌄", self.library.board().name),
-                                )
-                                .max_w(pixels(280.0))
-                                .overflow_hidden()
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.zoom_input = None;
-                                        this.focus.focus(window);
-                                        this.boards_open = !this.boards_open;
-                                        this.help_open = false;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(div().h(pixels(16.0)).w(pixels(1.0)).bg(rgb(BORDER)))
-                            .child(
-                                Self::button("new-board", "+")
-                                    .text_size(pixels(20.0))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.new_board(window, cx)
-                                    })),
+                        Self::button("hide-sidebar", "‹")
+                            .w(pixels(28.0))
+                            .px_0()
+                            .text_size(pixels(22.0))
+                            .text_color(rgb(MUTED))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
                             ),
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(pixels(14.0))
-                    .child(div().text_size(pixels(11.0)).text_color(rgb(MUTED)).child(
-                        if self.importing {
-                            "Adding images…"
-                        } else if self.dirty {
-                            "Saving…"
-                        } else {
-                            "Saved locally"
-                        },
-                    ))
-                    .child(
-                        Self::button("add-images", "+  Add images")
-                            .h(pixels(38.0))
-                            .px(pixels(16.0))
-                            .bg(rgb(ACCENT))
-                            .text_color(rgb(0x20271e))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, _, cx| this.choose_images(cx))),
-                    ),
+                div().px(pixels(16.0)).pb(pixels(24.0)).child(
+                    Self::button("new-board", "+  New board")
+                        .w_full()
+                        .justify_start()
+                        .bg(rgb(0x292d29))
+                        .text_color(rgb(ACCENT))
+                        .on_click(cx.listener(|this, _, window, cx| this.new_board(window, cx))),
+                ),
             )
-    }
-
-    fn board_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::panel()
-            .id("board-menu")
-            .absolute()
-            .left(pixels(149.0))
-            .top(pixels(72.0))
-            .w(pixels(286.0))
-            .p(pixels(8.0))
-            .flex()
-            .flex_col()
-            .gap(pixels(3.0))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .px(pixels(10.0))
-                    .py(pixels(8.0))
+                    .px(pixels(24.0))
+                    .pb(pixels(10.0))
                     .text_size(pixels(10.0))
                     .text_color(rgb(MUTED))
-                    .child("YOUR BOARDS"),
+                    .child("BOARDS"),
             )
             .child(
                 div()
                     .id("board-list")
-                    .max_h(pixels(300.0))
+                    .flex_1()
+                    .min_h_0()
+                    .px(pixels(12.0))
                     .overflow_y_scroll()
                     .children(self.library.boards.iter().map(|board| {
                         let id = board.id;
+                        let active = id == self.library.active;
                         div()
                             .id(SharedString::from(id.to_string()))
-                            .h(pixels(48.0))
-                            .px(pixels(10.0))
+                            .h(pixels(42.0))
+                            .mb(pixels(4.0))
+                            .px(pixels(12.0))
                             .flex()
                             .items_center()
-                            .justify_between()
+                            .gap(pixels(10.0))
                             .rounded(pixels(7.0))
                             .cursor_pointer()
-                            .when(id == self.library.active, |s| s.bg(rgb(0x30352e)))
-                            .hover(|s| s.bg(rgb(0x343739)))
+                            .hover(|s| s.bg(rgb(0x2b2e2c)))
+                            .when(active, |s| s.bg(rgb(0x30372d)).text_color(rgb(ACCENT)))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(pixels(3.0))
-                                    .overflow_hidden()
-                                    .child(div().text_size(pixels(12.0)).child(board.name.clone()))
-                                    .child(
-                                        div()
-                                            .text_size(pixels(10.0))
-                                            .text_color(rgb(MUTED))
-                                            .child(format!("{} images", board.images.len())),
-                                    ),
+                                    .size(pixels(7.0))
+                                    .rounded(pixels(2.0))
+                                    .flex_shrink_0()
+                                    .border_1()
+                                    .border_color(rgb(if active { ACCENT } else { MUTED }))
+                                    .when(active, |s| s.bg(rgb(ACCENT))),
                             )
-                            .when(id == self.library.active, |s| {
-                                s.child(div().text_color(rgb(ACCENT)).child("•"))
-                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .text_size(pixels(12.0))
+                                    .child(board.name.clone()),
+                            )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.switch_board(id, window, cx)
                             }))
                     })),
             )
-            .child(div().h(pixels(1.0)).my(pixels(5.0)).bg(rgb(BORDER)))
             .child(
-                Self::button("menu-new", "+  New board                         ⌘/Ctrl N")
-                    .justify_start()
-                    .on_click(cx.listener(|this, _, window, cx| this.new_board(window, cx))),
-            )
-            .child(
-                Self::button("rename", "Rename board")
-                    .justify_start()
-                    .on_click(cx.listener(|this, _, window, cx| this.rename_board(window, cx))),
-            )
-            .child(
-                Self::button("delete-board", "Delete board")
-                    .justify_start()
-                    .text_color(rgb(0xbc9691))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.checkpoint();
-                        this.motion = None;
-                        this.library.delete_active();
-                        this.selected.clear();
-                        this.boards_open = false;
-                        this.save(cx);
-                        this.toast("Board deleted · Ctrl/Cmd+Z to undo", cx);
-                    })),
+                div()
+                    .flex_shrink_0()
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .p(pixels(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(pixels(2.0))
+                    .child(
+                        Self::button("rename", "Rename board")
+                            .justify_start()
+                            .text_color(rgb(MUTED))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.rename_board(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Self::button("delete-board", "Delete board")
+                            .justify_start()
+                            .text_color(rgb(0xbc9691))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.checkpoint();
+                                this.motion = None;
+                                this.library.delete_active();
+                                this.selected.clear();
+                                this.save(cx);
+                                this.toast("Board deleted · Ctrl/Cmd+Z to undo", cx);
+                            })),
+                    ),
             )
     }
 
@@ -1054,7 +1109,7 @@ impl Magpie {
         div()
             .absolute()
             .bottom(pixels(24.0))
-            .left_0()
+            .left(pixels(self.canvas_left()))
             .right_0()
             .flex()
             .justify_center()
@@ -1146,7 +1201,7 @@ impl Magpie {
         div()
             .absolute()
             .bottom(pixels(80.0))
-            .left_0()
+            .left(pixels(self.canvas_left()))
             .right_0()
             .flex()
             .justify_center()
@@ -1258,7 +1313,10 @@ impl Magpie {
     fn empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .absolute()
-            .size_full()
+            .left(pixels(self.canvas_left()))
+            .right_0()
+            .top_0()
+            .bottom_0()
             .flex()
             .flex_col()
             .items_center()
@@ -1383,6 +1441,7 @@ impl Magpie {
 
     fn help(&self) -> impl IntoElement {
         let shortcuts = [
+            ("Boards sidebar", "Ctrl / ⌘ B"),
             ("New board", "Ctrl / ⌘ N"),
             ("Add images", "Ctrl / ⌘ O"),
             ("Paste image", "Ctrl / ⌘ V"),
@@ -1589,42 +1648,25 @@ impl Render for Magpie {
         if board.images.is_empty() {
             root = root.child(self.empty(cx));
         }
-        root = root
-            .child(self.header(cx))
-            .child(self.toolbar(cx))
-            .child(
-                div()
-                    .absolute()
-                    .left(pixels(24.0))
-                    .bottom(pixels(34.0))
-                    .text_size(pixels(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(if self.selected.is_empty() {
-                        format!("{} images  ·  Infinite canvas", board.images.len())
-                    } else {
-                        format!("{} selected  ·  Del to remove", self.selected.len())
-                    }),
-            )
-            .child(
-                Self::button("help", "?")
-                    .absolute()
-                    .right(pixels(24.0))
-                    .bottom(pixels(26.0))
-                    .w(pixels(34.0))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .text_color(rgb(MUTED))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.zoom_input = None;
-                        this.focus.focus(window);
-                        this.help_open = !this.help_open;
-                        this.boards_open = false;
-                        cx.notify();
-                    })),
-            );
+        root = root.child(self.header(cx)).child(self.toolbar(cx)).child(
+            Self::button("help", "?")
+                .absolute()
+                .right(pixels(24.0))
+                .bottom(pixels(26.0))
+                .w(pixels(34.0))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .text_color(rgb(MUTED))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.zoom_input = None;
+                    this.focus.focus(window);
+                    this.help_open = !this.help_open;
+                    cx.notify();
+                })),
+        );
         if self.boards_open {
-            root = root.child(self.board_menu(cx));
+            root = root.child(self.board_sidebar(cx));
         }
         if self.help_open {
             root = root.child(self.help());
@@ -1637,7 +1679,7 @@ impl Render for Magpie {
                 div()
                     .absolute()
                     .bottom(pixels(88.0))
-                    .left_0()
+                    .left(pixels(self.canvas_left()))
                     .right_0()
                     .flex()
                     .justify_center()

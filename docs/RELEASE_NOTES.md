@@ -1,10 +1,11 @@
 Collect what catches your eye. Magpie is a native mood board built with Rust and GPUI.
 
-- Smooth, pointer-anchored zoom with an editable percentage menu and quick presets.
-- Zoom far beyond the old 8%–600% range, with double-precision coordinates and an adaptive grid. Numerical safety range: 0.0000001%–100,000,000,000%.
-- Native macOS trackpad pinch support. Ctrl/Cmd+scroll zooms; ordinary scrolling pans, matching familiar design tools.
-- Shift+1 fits all images, Shift+2 fits the selection, and Shift+0 restores 100%. Plus/minus shortcuts work with or without Ctrl/Cmd.
-- Updated README screenshots and native interaction tests, including image rendering at extreme zoom.
+- A collapsible left sidebar for boards, with the Magpie wordmark, active-board highlighting, scrolling, and quick creation. Toggle it with Ctrl/Cmd+B.
+- Fit and zoom controls center content in the available canvas beside the sidebar.
+- A quieter canvas: removed the image-count footer, saved-status text, and Add images button.
+- A small animated spinner appears during imports and saving, then disappears when finished.
+- Drag and drop images, paste them, or use Ctrl/Cmd+O to open the file picker.
+- Refreshed README screenshots.
 
 ### Downloads
 

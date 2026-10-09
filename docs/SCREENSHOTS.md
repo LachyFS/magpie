@@ -1,6 +1,6 @@
 # Screenshots
 
-The README screenshots are captures of the real Linux GPUI app, using a temporary demo library. They are not interface mockups and contain no user data. Demo photo positions are prepared before opening the app, and the zoom menu, board menu, and new-board state are reached through native input.
+The README screenshots are captures of the real Linux GPUI app, using a temporary demo library. They are not interface mockups and contain no user data. Demo photo positions are prepared before opening the app, and the zoom menu, collapsible board sidebar, and new-board state are reached through native input.
 
 After building, regenerate them with:
 
